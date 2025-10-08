@@ -1,0 +1,8 @@
+[
+  {"id":101,"question":"Which Python keyword is used to create a function?","options":["func","def","lambda","function"],"answer_index":1},
+  {"id":102,"question":"Which HTTP status code indicates 'Not Found'?","options":["200","301","404","500"],"answer_index":2},
+  {"id":103,"question":"Which AWS service stores objects (files) with high durability?","options":["EC2","S3","RDS","ECS"],"answer_index":1},
+  {"id":104,"question":"What is the result of 3 * 2 ** 2 in Python?","options":["12","36","18","None of the above"],"answer_index":0}
+]
+
+

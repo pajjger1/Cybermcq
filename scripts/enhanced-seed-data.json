@@ -1,0 +1,122 @@
+[
+  {
+    "id": "101",
+    "question": "Which Python keyword is used to create a function?",
+    "options": ["func", "def", "lambda", "function"],
+    "answer_index": 1,
+    "subject": "Python Programming",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "102", 
+    "question": "Which HTTP status code indicates 'Not Found'?",
+    "options": ["200", "301", "404", "500"],
+    "answer_index": 2,
+    "subject": "Web Development",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "103",
+    "question": "Which AWS service stores objects (files) with high durability?",
+    "options": ["EC2", "S3", "RDS", "ECS"],
+    "answer_index": 1,
+    "subject": "AWS Cloud",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "104",
+    "question": "What is the result of 3 * 2 ** 2 in Python?",
+    "options": ["12", "36", "18", "None of the above"],
+    "answer_index": 0,
+    "subject": "Python Programming",
+    "difficulty": "MEDIUM"
+  },
+  {
+    "id": "105",
+    "question": "What does REST stand for in web development?",
+    "options": ["Representational State Transfer", "Remote State Transfer", "Relational State Transfer", "Reactive State Transfer"],
+    "answer_index": 0,
+    "subject": "Web Development",
+    "difficulty": "MEDIUM"
+  },
+  {
+    "id": "106",
+    "question": "Which AWS service is used for serverless computing?",
+    "options": ["EC2", "Lambda", "RDS", "S3"],
+    "answer_index": 1,
+    "subject": "AWS Cloud",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "107",
+    "question": "What is the time complexity of accessing an element in a Python list by index?",
+    "options": ["O(1)", "O(n)", "O(log n)", "O(n²)"],
+    "answer_index": 0,
+    "subject": "Python Programming",
+    "difficulty": "MEDIUM"
+  },
+  {
+    "id": "108",
+    "question": "Which HTTP method is typically used to update a resource?",
+    "options": ["GET", "POST", "PUT", "DELETE"],
+    "answer_index": 2,
+    "subject": "Web Development",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "109",
+    "question": "What is the maximum execution time for an AWS Lambda function?",
+    "options": ["5 minutes", "10 minutes", "15 minutes", "30 minutes"],
+    "answer_index": 2,
+    "subject": "AWS Cloud",
+    "difficulty": "MEDIUM"
+  },
+  {
+    "id": "110",
+    "question": "Which Python data structure is ordered and mutable?",
+    "options": ["tuple", "set", "list", "frozenset"],
+    "answer_index": 2,
+    "subject": "Python Programming",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "111",
+    "question": "What does CORS stand for in web development?",
+    "options": ["Cross-Origin Resource Sharing", "Cross-Origin Request Security", "Cross-Origin Response Sharing", "Cross-Origin Resource Security"],
+    "answer_index": 0,
+    "subject": "Web Development",
+    "difficulty": "MEDIUM"
+  },
+  {
+    "id": "112",
+    "question": "Which AWS service provides a managed NoSQL database?",
+    "options": ["RDS", "DynamoDB", "Redshift", "ElastiCache"],
+    "answer_index": 1,
+    "subject": "AWS Cloud",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "113",
+    "question": "What is the output of len('Hello World'.split())?",
+    "options": ["1", "2", "10", "11"],
+    "answer_index": 1,
+    "subject": "Python Programming",
+    "difficulty": "EASY"
+  },
+  {
+    "id": "114",
+    "question": "Which status code indicates a successful POST request that created a resource?",
+    "options": ["200", "201", "202", "204"],
+    "answer_index": 1,
+    "subject": "Web Development",
+    "difficulty": "MEDIUM"
+  },
+  {
+    "id": "115",
+    "question": "What is the default port for HTTPS?",
+    "options": ["80", "443", "8080", "3000"],
+    "answer_index": 1,
+    "subject": "Web Development",
+    "difficulty": "EASY"
+  }
+]

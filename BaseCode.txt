@@ -1,0 +1,929 @@
+I’ve given you:
+ Architecture
+ DynamoDB design
+ Amplify CLI steps (end-to-end)
+ Lambda (Python) API with CRUD + quiz logic
+ IAM &amp; environment config
+ React front end (Amplify + REST) for full CRUD
+ Optional bulk import path from your old questions.json
+
+1) Architecture (at a glance)
+ Frontend: React (Amplify Hosting, Amplify UI, Amplify API [REST])
+ Auth (optional but recommended): Amazon Cognito (only Admins can
+write)
+ API: API Gateway (REST) → Lambda (Python/boto3)
+ DB: DynamoDB table QuizQuestions
+ Logging/Monitoring: CloudWatch Logs
+Routes:
+ GET /questions?limit=50&amp;nextToken=... — list, paginated
+ POST /questions — create
+ GET /questions/{id} — read one
+ PUT /questions/{id} — update
+ DELETE /questions/{id} — delete
+ GET /quiz?count=10 — return N random questions (server-side sampling)
+
+2) DynamoDB design
+Table: QuizQuestions
+ PK: questionId (string, ULID/UUID)
+ Attributes:
+o question (string)
+
+o options (list of strings, length 4)
+o answerIndex (number; 0–3)
+o tags (list of strings, optional)
+o createdAt (ISO 8601 string)
+o updatedAt (ISO 8601 string)
+
+Why simple PK only? For 500 items, a single-table with PK is perfect. We’ll paginate
+with LastEvaluatedKey. Random quiz is done by fetching more than needed +
+sampling in Lambda (efficient at this size).
+
+3) Amplify: end-to-end steps
+Requires: Node 18+, Amplify CLI (npm i -g @aws-amplify/cli), AWS credentials.
+# 0) Create app
+npx create-react-app quiz-admin --template cra
+cd quiz-admin
+
+# 1) Initialize Amplify
+amplify init
+# Answer prompts (env name: dev). Accept defaults.
+
+# 2) Add (optional) auth so only admins can write
+amplify add auth
+# Default configuration — then later restrict API methods by group/role if desired.
+
+# 3) Add DynamoDB table
+amplify add storage
+# Choose: NoSQL Database
+# Provide table name: QuizQuestions
+# Partition key: questionId (string)
+# Sort key: No
+# Add GSI: No
+
+# Enable Lambda triggers: No (for now)
+
+# 4) Add REST API + Lambda
+amplify add api
+# Choose: REST
+# Path: / (we’ll add subpaths)
+# Create a new Lambda function: quizApi
+# Runtime: Python 3.12 (or 3.11)
+# Permissions: Give access to the new DynamoDB table when prompted
+# Restrict API by Cognito? Recommended: YES (GET allowed to all;
+POST/PUT/DELETE for authenticated or group &quot;Admin&quot;).
+
+# 5) Push backend
+amplify push
+After push, Amplify will output:
+ API endpoint URL (save it)
+ Deployed Lambda function name
+ DynamoDB table name
+ (If auth enabled) Cognito pool IDs
+
+4) Lambda (Python) — CRUD + quiz
+Replace the generated handler with this (file in
+amplify/backend/function/quizApi/src/index.py):
+import os
+import json
+import boto3
+import random
+import datetime
+from urllib.parse import parse_qs
+
+dynamodb = boto3.resource(&#39;dynamodb&#39;)
+TABLE_NAME = os.environ.get(&#39;STORAGE_QUIZQUESTIONS_NAME&#39;) or
+os.environ.get(&#39;TABLE_NAME&#39;) or &#39;QuizQuestions&#39;
+table = dynamodb.Table(TABLE_NAME)
+
+CORS_HEADERS = {
+&#39;Access-Control-Allow-Origin&#39;: &#39;*&#39;, # tighten to your domain in prod
+&#39;Access-Control-Allow-Headers&#39;: &#39;Content-Type,Authorization&#39;,
+&#39;Access-Control-Allow-Methods&#39;: &#39;GET,POST,PUT,DELETE,OPTIONS&#39;
+}
+
+def _response(status, body):
+return {
+&#39;statusCode&#39;: status,
+&#39;headers&#39;: {**CORS_HEADERS, &#39;Content-Type&#39;: &#39;application/json&#39;},
+&#39;body&#39;: json.dumps(body)
+}
+
+def _now_iso():
+return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + &#39;Z&#39;
+
+def lambda_handler(event, context):
+method = event.get(&#39;httpMethod&#39;, &#39;GET&#39;)
+path = event.get(&#39;path&#39;, &#39;/&#39;)
+qs = event.get(&#39;queryStringParameters&#39;) or {}
+body = event.get(&#39;body&#39;) or &#39;&#39;
+is_b64 = event.get(&#39;isBase64Encoded&#39;, False)
+if is_b64 and body:
+import base64
+
+body = base64.b64decode(body).decode(&#39;utf-8&#39;)
+
+if method == &#39;OPTIONS&#39;:
+return {&#39;statusCode&#39;: 200, &#39;headers&#39;: CORS_HEADERS, &#39;body&#39;: &#39;&#39;}
+
+# Routes
+# GET /questions (list)
+if method == &#39;GET&#39; and path.endswith(&#39;/questions&#39;):
+limit = int(qs.get(&#39;limit&#39;, &#39;50&#39;))
+eks = qs.get(&#39;nextToken&#39;)
+scan_kwargs = {&#39;Limit&#39;: min(limit, 100)}
+if eks:
+scan_kwargs[&#39;ExclusiveStartKey&#39;] = json.loads(eks)
+res = table.scan(**scan_kwargs)
+return _response(200, {
+&#39;items&#39;: res.get(&#39;Items&#39;, []),
+&#39;nextToken&#39;: json.dumps(res[&#39;LastEvaluatedKey&#39;]) if &#39;LastEvaluatedKey&#39; in res
+else None
+})
+
+# POST /questions (create)
+if method == &#39;POST&#39; and path.endswith(&#39;/questions&#39;):
+try:
+payload = json.loads(body or &#39;{}&#39;)
+# validate
+for f in [&#39;question&#39;,&#39;options&#39;,&#39;answerIndex&#39;]:
+if f not in payload:
+return _response(400, {&#39;error&#39;: f&#39;Missing field: {f}&#39;})
+if not isinstance(payload[&#39;options&#39;], list) or len(payload[&#39;options&#39;]) != 4:
+
+return _response(400, {&#39;error&#39;: &#39;options must be a list of 4 strings&#39;})
+if not (0 &lt;= int(payload[&#39;answerIndex&#39;]) &lt;= 3):
+return _response(400, {&#39;error&#39;: &#39;answerIndex must be 0..3&#39;})
+
+qid = payload.get(&#39;questionId&#39;) or _gen_id()
+now = _now_iso()
+item = {
+&#39;questionId&#39;: qid,
+&#39;question&#39;: payload[&#39;question&#39;],
+&#39;options&#39;: payload[&#39;options&#39;],
+&#39;answerIndex&#39;: int(payload[&#39;answerIndex&#39;]),
+&#39;tags&#39;: payload.get(&#39;tags&#39;, []),
+&#39;createdAt&#39;: now,
+&#39;updatedAt&#39;: now
+}
+table.put_item(Item=item,
+ConditionExpression=&#39;attribute_not_exists(questionId)&#39;)
+return _response(201, item)
+except Exception as e:
+return _response(500, {&#39;error&#39;: str(e)})
+
+# GET /questions/{id}
+if method == &#39;GET&#39; and &#39;/questions/&#39; in path:
+qid = path.rsplit(&#39;/&#39;, 1)[-1]
+res = table.get_item(Key={&#39;questionId&#39;: qid})
+item = res.get(&#39;Item&#39;)
+if not item:
+return _response(404, {&#39;error&#39;: &#39;Not found&#39;})
+return _response(200, item)
+
+# PUT /questions/{id}
+if method == &#39;PUT&#39; and &#39;/questions/&#39; in path:
+qid = path.rsplit(&#39;/&#39;, 1)[-1]
+try:
+payload = json.loads(body or &#39;{}&#39;)
+# Only allow specific fields
+allowed = {&#39;question&#39;,&#39;options&#39;,&#39;answerIndex&#39;,&#39;tags&#39;}
+update_fields = {k:v for k,v in payload.items() if k in allowed}
+if &#39;options&#39; in update_fields:
+if not isinstance(update_fields[&#39;options&#39;], list) or len(update_fields[&#39;options&#39;])
+!= 4:
+return _response(400, {&#39;error&#39;: &#39;options must be a list of 4 strings&#39;})
+if &#39;answerIndex&#39; in update_fields:
+if not (0 &lt;= int(update_fields[&#39;answerIndex&#39;]) &lt;= 3):
+return _response(400, {&#39;error&#39;: &#39;answerIndex must be 0..3&#39;})
+
+expr = []
+names = {}
+values = {}
+for k,v in update_fields.items():
+expr.append(f&quot;#_{k} = :{k}&quot;)
+names[f&quot;#_{k}&quot;] = k
+values[f&quot;:{k}&quot;] = v
+expr.append(&quot;#_updatedAt = :updatedAt&quot;)
+names[&quot;#_updatedAt&quot;] = &quot;updatedAt&quot;
+values[&quot;:updatedAt&quot;] = _now_iso()
+
+if not expr:
+
+return _response(400, {&#39;error&#39;: &#39;No updatable fields provided&#39;})
+
+res = table.update_item(
+Key={&#39;questionId&#39;: qid},
+UpdateExpression=&quot;SET &quot; + &quot;, &quot;.join(expr),
+ExpressionAttributeNames=names,
+ExpressionAttributeValues=values,
+ConditionExpression=&#39;attribute_exists(questionId)&#39;,
+ReturnValues=&#39;ALL_NEW&#39;
+)
+return _response(200, res[&#39;Attributes&#39;])
+except Exception as e:
+return _response(500, {&#39;error&#39;: str(e)})
+
+# DELETE /questions/{id}
+if method == &#39;DELETE&#39; and &#39;/questions/&#39; in path:
+qid = path.rsplit(&#39;/&#39;, 1)[-1]
+try:
+table.delete_item(
+Key={&#39;questionId&#39;: qid},
+ConditionExpression=&#39;attribute_exists(questionId)&#39;
+)
+return _response(204, {})
+except Exception as e:
+return _response(500, {&#39;error&#39;: str(e)})
+
+# GET /quiz?count=10
+if method == &#39;GET&#39; and path.endswith(&#39;/quiz&#39;):
+count = max(1, min(int(qs.get(&#39;count&#39;,&#39;10&#39;)), 50))
+
+# For ~500 items, one scan is fine; for larger, use better sampling strategies.
+res =
+table.scan(ProjectionExpression=&#39;questionId,question,options,answerIndex&#39;)
+items = res.get(&#39;Items&#39;, [])
+if len(items) &lt;= count:
+selected = items
+else:
+selected = random.sample(items, count)
+
+# Shuffle options per question while preserving correct index
+prepared = []
+for q in selected:
+idxs = list(range(4))
+random.shuffle(idxs)
+shuffled = [q[&#39;options&#39;][i] for i in idxs]
+correct_new = idxs.index(int(q[&#39;answerIndex&#39;]))
+prepared.append({
+&#39;questionId&#39;: q[&#39;questionId&#39;],
+&#39;question&#39;: q[&#39;question&#39;],
+&#39;options&#39;: shuffled,
+&#39;answerIndex&#39;: correct_new
+})
+return _response(200, {&#39;questions&#39;: prepared, &#39;total&#39;: len(prepared)})
+
+return _response(404, {&#39;error&#39;:&#39;Route not found&#39;, &#39;path&#39;: path})
+
+def _gen_id():
+# Tiny ULID-like sortable ID (ok for demo; replace with proper ULID lib if preferred)
+import time, uuid
+
+return f&quot;{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}&quot;
+Function settings (Amplify auto-wires most of this):
+ Environment variable TABLE_NAME or
+STORAGE_QUIZQUESTIONS_NAME (Amplify injects the latter when you
+granted permissions).
+ Timeout: 10s
+ Memory: 512MB
+IAM policy (Amplify sets automatically when you grant table access),
+conceptually:
+{
+&quot;Effect&quot;: &quot;Allow&quot;,
+&quot;Action&quot;:
+[&quot;dynamodb:PutItem&quot;,&quot;dynamodb:GetItem&quot;,&quot;dynamodb:UpdateItem&quot;,&quot;dynamodb:Del
+eteItem&quot;,&quot;dynamodb:Scan&quot;],
+&quot;Resource&quot;: [&quot;arn:aws:dynamodb:*:*:table/QuizQuestions&quot;]
+}
+Update API paths
+Run amplify update api → Edit paths:
+ GET /questions
+ POST /questions
+ GET /questions/{id}
+ PUT /questions/{id}
+ DELETE /questions/{id}
+ GET /quiz
+Then amplify push.
+
+5) React Front End (CRUD + Quiz)
+Install Amplify libs:
+npm i aws-amplify @aws-amplify/ui-react
+Configure Amplify (src/aws-exports.js is generated by Amplify). In src/index.js:
+import React from &#39;react&#39;;
+
+import ReactDOM from &#39;react-dom/client&#39;;
+import &#39;./index.css&#39;;
+import App from &#39;./App&#39;;
+import { Amplify } from &#39;aws-amplify&#39;;
+import awsExports from &#39;./aws-exports&#39;;
+Amplify.configure(awsExports);
+
+const root = ReactDOM.createRoot(document.getElementById(&#39;root&#39;));
+root.render(&lt;App /&gt;);
+A simple Admin UI (src/App.jsx) that lists, creates, updates, deletes, and starts a
+quiz:
+import React, { useEffect, useState } from &#39;react&#39;;
+import { API } from &#39;aws-amplify&#39;;
+import { Authenticator, Button, TextField, Card, Heading } from &#39;@aws-amplify/ui-
+react&#39;;
+import &#39;@aws-amplify/ui-react/styles.css&#39;;
+
+const apiName = &#39;quizApi&#39;; // Amplify will name it something like &#39;quizApi&#39;; confirm in
+aws-exports
+const basePath = &#39;&#39;; // often empty; if your API has a stage, include it
+
+function App() {
+const [items, setItems] = useState([]);
+const [nextToken, setNextToken] = useState(null);
+const [form, setForm] = useState({question:&#39;&#39;, options:[&#39;&#39;,&#39;&#39;,&#39;&#39;,&#39;&#39;], answerIndex:0,
+tags:&#39;&#39;});
+const [editingId, setEditingId] = useState(null);
+const [quiz, setQuiz] = useState([]);
+
+const load = async (token=null) =&gt; {
+
+const path = `${basePath}/questions${token ?
+`?nextToken=${encodeURIComponent(token)}` : &#39;&#39;}`;
+const res = await API.get(apiName, path, {});
+setItems(token ? [...items, ...res.items] : res.items);
+setNextToken(res.nextToken);
+};
+
+useEffect(()=&gt;{ load(); /* eslint-disable-next-line */}, []);
+
+const submit = async (e) =&gt; {
+e.preventDefault();
+const payload = {
+question: form.question.trim(),
+options: form.options.map(o =&gt; o.trim()),
+answerIndex: Number(form.answerIndex),
+tags: form.tags ? form.tags.split(&#39;,&#39;).map(t=&gt;t.trim()).filter(Boolean) : []
+};
+if (editingId) {
+await API.put(apiName, `${basePath}/questions/${editingId}`, { body: payload });
+setEditingId(null);
+} else {
+await API.post(apiName, `${basePath}/questions`, { body: payload });
+}
+setForm({question:&#39;&#39;, options:[&#39;&#39;,&#39;&#39;,&#39;&#39;,&#39;&#39;], answerIndex:0, tags:&#39;&#39;});
+load();
+};
+
+const edit = (it) =&gt; {
+setEditingId(it.questionId);
+
+setForm({
+question: it.question,
+options: it.options.slice(),
+answerIndex: it.answerIndex,
+tags: (it.tags || []).join(&#39;, &#39;)
+});
+};
+
+const del = async (id) =&gt; {
+if (!window.confirm(&#39;Delete this question?&#39;)) return;
+await API.del(apiName, `${basePath}/questions/${id}`, {});
+load();
+};
+
+const startQuiz = async (count=10) =&gt; {
+const res = await API.get(apiName, `${basePath}/quiz?count=${count}`, {});
+setQuiz(res.questions);
+};
+
+const setOpt = (idx, val) =&gt; {
+const next = form.options.slice(); next[idx] = val;
+setForm({...form, options: next});
+};
+
+return (
+&lt;Authenticator&gt;
+{({ signOut, user }) =&gt; (
+&lt;div style={{maxWidth:960, margin:&#39;2rem auto&#39;, padding:&#39;0 1rem&#39;}}&gt;
+&lt;Heading level={3}&gt;Quiz Admin (DynamoDB)&lt;/Heading&gt;
+
+&lt;p&gt;Signed in as {user?.username} &lt;Button onClick={signOut}&gt;Sign
+out&lt;/Button&gt;&lt;/p&gt;
+
+&lt;Card variation=&quot;outlined&quot; style={{padding:&#39;1rem&#39;, margin:&#39;1rem 0&#39;}}&gt;
+&lt;Heading level={5}&gt;{editingId ? &#39;Edit Question&#39; : &#39;Create
+Question&#39;}&lt;/Heading&gt;
+&lt;form onSubmit={submit}&gt;
+&lt;TextField label=&quot;Question&quot; value={form.question}
+onChange={(e)=&gt;setForm({...form, question:e.target.value})} required /&gt;
+&lt;div style={{display:&#39;grid&#39;, gridTemplateColumns:&#39;1fr 1fr&#39;, gap:&#39;0.5rem&#39;,
+marginTop:&#39;0.5rem&#39;}}&gt;
+{[0,1,2,3].map(i=&gt;(
+&lt;TextField key={i} label={`Option ${i+1}`} value={form.options[i]}
+onChange={(e)=&gt;setOpt(i, e.target.value)} required /&gt;
+))}
+&lt;/div&gt;
+&lt;TextField
+label=&quot;Correct answer index (0..3)&quot;
+type=&quot;number&quot;
+min={0}
+max={3}
+value={form.answerIndex}
+onChange={(e)=&gt;setForm({...form, answerIndex: e.target.value})}
+required
+/&gt;
+&lt;TextField label=&quot;Tags (comma separated)&quot; value={form.tags}
+onChange={(e)=&gt;setForm({...form, tags:e.target.value})} /&gt;
+&lt;div style={{marginTop:&#39;0.75rem&#39;, display:&#39;flex&#39;, gap:&#39;0.5rem&#39;}}&gt;
+&lt;Button type=&quot;submit&quot; variation=&quot;primary&quot;&gt;{editingId ? &#39;Save&#39; :
+&#39;Create&#39;}&lt;/Button&gt;
+{editingId &amp;&amp; &lt;Button onClick={()=&gt;{ setEditingId(null);
+setForm({question:&#39;&#39;, options:[&#39;&#39;,&#39;&#39;,&#39;&#39;,&#39;&#39;], answerIndex:0, tags:&#39;&#39;}); }}&gt;Cancel&lt;/Button&gt;}
+
+&lt;/div&gt;
+&lt;/form&gt;
+&lt;/Card&gt;
+
+&lt;Card variation=&quot;outlined&quot; style={{padding:&#39;1rem&#39;, margin:&#39;1rem 0&#39;}}&gt;
+&lt;Heading level={5}&gt;Questions ({items.length})&lt;/Heading&gt;
+&lt;ul style={{listStyle:&#39;none&#39;, padding:0}}&gt;
+{items.map(it=&gt;(
+&lt;li key={it.questionId} style={{borderBottom:&#39;1px solid #eee&#39;,
+padding:&#39;0.5rem 0&#39;}}&gt;
+&lt;strong&gt;{it.question}&lt;/strong&gt;
+&lt;div style={{fontSize:&#39;0.9rem&#39;}}&gt;Options: {it.options.join(&#39; | &#39;)} |
+AnswerIndex: {it.answerIndex}&lt;/div&gt;
+&lt;div style={{display:&#39;flex&#39;, gap:&#39;0.5rem&#39;, marginTop:&#39;0.25rem&#39;}}&gt;
+&lt;Button onClick={()=&gt;edit(it)}&gt;Edit&lt;/Button&gt;
+&lt;Button variation=&quot;destructive&quot;
+onClick={()=&gt;del(it.questionId)}&gt;Delete&lt;/Button&gt;
+&lt;/div&gt;
+&lt;/li&gt;
+))}
+&lt;/ul&gt;
+{nextToken &amp;&amp; &lt;Button onClick={()=&gt;load(nextToken)}&gt;Load more&lt;/Button&gt;}
+&lt;/Card&gt;
+
+&lt;Card variation=&quot;outlined&quot; style={{padding:&#39;1rem&#39;, margin:&#39;1rem 0&#39;}}&gt;
+&lt;Heading level={5}&gt;Start a Quiz (randomized)&lt;/Heading&gt;
+&lt;div style={{display:&#39;flex&#39;, gap:&#39;0.5rem&#39;}}&gt;
+&lt;Button onClick={()=&gt;startQuiz(5)}&gt;5 Qs&lt;/Button&gt;
+&lt;Button onClick={()=&gt;startQuiz(10)}&gt;10 Qs&lt;/Button&gt;
+&lt;Button onClick={()=&gt;startQuiz(20)}&gt;20 Qs&lt;/Button&gt;
+
+&lt;/div&gt;
+{quiz.length&gt;0 &amp;&amp; (
+&lt;div style={{marginTop:&#39;0.75rem&#39;}}&gt;
+{quiz.map((q,i)=&gt;(
+&lt;div key={q.questionId} style={{marginBottom:&#39;0.75rem&#39;}}&gt;
+&lt;strong&gt;Q{i+1}.&lt;/strong&gt; {q.question}
+&lt;ol&gt;
+{q.options.map((o,idx)=&gt;(&lt;li key={idx}&gt;{o}&lt;/li&gt;))}
+&lt;/ol&gt;
+&lt;em&gt;Correct index: {q.answerIndex}&lt;/em&gt;
+&lt;/div&gt;
+))}
+&lt;/div&gt;
+)}
+&lt;/Card&gt;
+&lt;/div&gt;
+)}
+&lt;/Authenticator&gt;
+);
+}
+export default App;
+Hook the API name correctly
+Open src/aws-exports.js and find the REST API’s name &amp; endpoint. If the name is
+not quizApi, update apiName accordingly.
+Deploy front end:
+amplify hosting add
+amplify publish
+
+6) Security &amp; roles (recommended)
+
+ In amplify update api, restrict POST/PUT/DELETE to Authenticated users (or
+a Cognito Admin group). Allow GET /quiz publicly if you want a public quiz.
+ Add a Cognito group “Admin” and map your user to it.
+ Consider swapping wildcard CORS origin to your domain only.
+
+7) Optional – bulk import your existing JSON
+Create a one-off local script (outside Amplify) to import your questions.json:
+# import_questions.py
+import json, boto3, uuid, datetime
+TABLE_NAME = &#39;QuizQuestions&#39;
+d = boto3.resource(&#39;dynamodb&#39;).Table(TABLE_NAME)
+now = datetime.datetime.utcnow().replace(microsecond=0).isoformat()+&#39;Z&#39;
+
+with open(&#39;questions.json&#39;,&#39;r&#39;,encoding=&#39;utf-8&#39;) as f:
+data = json.load(f)
+
+with d.batch_writer() as bw:
+for q in data:
+bw.put_item(Item={
+&#39;questionId&#39;: str(q.get(&#39;id&#39;) or uuid.uuid4()),
+&#39;question&#39;: q[&#39;question&#39;],
+&#39;options&#39;: q[&#39;options&#39;],
+&#39;answerIndex&#39;: int(q[&#39;answer_index&#39;]),
+&#39;tags&#39;: q.get(&#39;tags&#39;, []),
+&#39;createdAt&#39;: now,
+&#39;updatedAt&#39;: now
+})
+print(&#39;Imported&#39;, len(data))
+Run it once with AWS creds pointing to the same account/region.
+
+8) Notes on changes vs your original code
+ No HTML rendering in Lambda anymore. The frontend (React) handles UI;
+the backend is pure JSON.
+ Randomization moved server-side for answer shuffling (preserves
+correctness).
+ DynamoDB replaces file I/O. We added validation and timestamps.
+ Scalability: For ~500 items, a single scan for /quiz is fine. If you grow larger,
+switch to:
+o Precomputed “random buckets” or
+o A GSI with a random partition key, or
+o Store rand attribute in [0..999] and query a random bucket.
+
+That’s it
+You’ve got a fully working Amplify stack with DynamoDB persistence and a React
+admin app for CRUD + quiz. If you want this packaged as a Git repo structure
+(folders/files ready to copy), say the word and I’ll lay it out exactly as a project tree.
+
+import json
+import random
+import os
+from urllib.parse import parse_qs
+import html
+# ---------- Data loading ----------
+def load_questions():
+    # Try to load from JSON file first, fallback to embedded questions
+    try:
+       
+questions_path = os.path.join(os.path.dirname(__file__), &quot;questions.json&quot;)
+        with open(questions_path, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
+            questions = json.load(f)
+            return questions
+    except Exception as e:
+        # Fallback to embedded questions if file loading fails
+        return [
+            {
+                &quot;id&quot;: 101,
+                &quot;question&quot;: &quot;Which Python keyword is used to create a
+function?&quot;,
+                &quot;options&quot;: [&quot;func&quot;, &quot;def&quot;, &quot;lambda&quot;, &quot;function&quot;],
+                &quot;answer_index&quot;: 1
+            },
+            {
+                &quot;id&quot;: 102,
+                &quot;question&quot;: &quot;Which HTTP status code indicates &#39;Not Found&#39;?&quot;,
+                &quot;options&quot;: [&quot;200&quot;, &quot;301&quot;, &quot;404&quot;, &quot;500&quot;],
+                &quot;answer_index&quot;: 2
+            },
+            {
+                &quot;id&quot;: 103,
+                &quot;question&quot;: &quot;Which AWS service stores objects (files) with
+high durability?&quot;,
+                &quot;options&quot;: [&quot;EC2&quot;, &quot;S3&quot;, &quot;RDS&quot;, &quot;ECS&quot;],
+                &quot;answer_index&quot;: 1
+            },
+            {
+                &quot;id&quot;: 104,
+                &quot;question&quot;: &quot;What is the result of 3 * 2 ** 2 in Python?&quot;,
+                &quot;options&quot;: [&quot;12&quot;, &quot;36&quot;, &quot;18&quot;, &quot;None of the above&quot;],
+                &quot;answer_index&quot;: 0
+            }
+        ]
+def render_homepage(total_questions):
+    &quot;&quot;&quot;Render the homepage with question selection&quot;&quot;&quot;
+    return f&#39;&#39;&#39;&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+  &lt;meta charset=&quot;utf-8&quot;&gt;
+  &lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+  &lt;title&gt;MCQ Quiz&lt;/title&gt;
+  &lt;style&gt;
+
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial,
+sans-serif; margin: 2rem; }}
+    .card {{ max-width: 720px; margin: 0 auto; padding: 1.5rem; border: 1px
+solid #e5e7eb; border-radius: 1rem; }}
+    h1 {{ margin-top: 0; }}
+    label {{ display: block; margin: 0.5rem 0; }}
+    input[type=&quot;number&quot;] {{ padding: 0.5rem; width: 100%; max-width: 200px; }}
+    button {{ padding: 0.75rem 1rem; border: 0; border-radius: 0.75rem;
+cursor: pointer; }}
+    .primary {{ background: #111827; color: white; }}
+    .muted {{ color: #6b7280; font-size: 0.9rem; }}
+  &lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;div class=&quot;card&quot;&gt;
+    &lt;h1&gt;MCQ Quiz&lt;/h1&gt;
+    &lt;p class=&quot;muted&quot;&gt;Choose how many questions you want (up
+to {total_questions}), then start.&lt;/p&gt;
+    &lt;form method=&quot;post&quot; action=&quot;/dev&quot;&gt;
+      &lt;input type=&quot;hidden&quot; name=&quot;action&quot; value=&quot;start&quot;&gt;
+      &lt;label for=&quot;num_questions&quot;&gt;Number of questions&lt;/label&gt;
+      &lt;input id=&quot;num_questions&quot; name=&quot;num_questions&quot; type=&quot;number&quot; min=&quot;1&quot;
+max=&quot;{total_questions}&quot; value=&quot;2&quot; required&gt;
+      &lt;div style=&quot;height:1rem&quot;&gt;&lt;/div&gt;
+      &lt;button class=&quot;primary&quot; type=&quot;submit&quot;&gt;Start Quiz&lt;/button&gt;
+    &lt;/form&gt;
+    &lt;p class=&quot;muted&quot;&gt;Tip: Add more questions in
+&lt;code&gt;questions.json&lt;/code&gt;.&lt;/p&gt;
+  &lt;/div&gt;
+&lt;/body&gt;
+&lt;/html&gt;&#39;&#39;&#39;
+def render_question_page(question, q_number, q_total, state_json, feedback=Non
+e):
+    &quot;&quot;&quot;Render a quiz question page&quot;&quot;&quot;
+    options_html = &quot;&quot;
+    for i, opt in enumerate(question[&quot;options&quot;]):
+        options_html += f&#39;&#39;&#39;
+        &lt;li&gt;
+          &lt;label&gt;
+            &lt;input type=&quot;radio&quot; name=&quot;selected&quot; value=&quot;{i}&quot; required&gt;
+            &lt;span&gt;{i+1}. {html.escape(opt)}&lt;/span&gt;
+          &lt;/label&gt;
+        &lt;/li&gt;&#39;&#39;&#39;
+   
+    feedback_html = &quot;&quot;
+    if feedback:
+        if feedback[&quot;correct&quot;]:
+            feedback_html = &#39;&lt;div class=&quot;feedback ok&quot;&gt;✅ Correct!&lt;/div&gt;&#39;
+        else:
+            feedback_html = f&#39;&lt;div class=&quot;feedback bad&quot;&gt;❌ Incorrect. The
+correct answer is option
+&lt;strong&gt;{feedback[&quot;correct_index&quot;] + 1}&lt;/strong&gt;.&lt;/div&gt;&#39;
+   
+    return f&#39;&#39;&#39;&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+
+&lt;head&gt;
+  &lt;meta charset=&quot;utf-8&quot;&gt;
+  &lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+  &lt;title&gt;Question {q_number} / {q_total}&lt;/title&gt;
+  &lt;style&gt;
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial,
+sans-serif; margin: 2rem; }}
+    .card {{ max-width: 720px; margin: 0 auto; padding: 1.5rem; border: 1px
+solid #e5e7eb; border-radius: 1rem; }}
+    h1 {{ margin-top: 0; font-size: 1.25rem; }}
+    .progress {{ color: #6b7280; font-size: 0.9rem; }}
+    .options {{ list-style: none; padding: 0; }}
+    .options li {{ margin: 0.75rem 0; }}
+    label {{ display: flex; gap: 0.5rem; align-items: center; }}
+    button {{ padding: 0.75rem 1rem; border: 0; border-radius: 0.75rem;
+cursor: pointer; }}
+    .primary {{ background: #111827; color: white; }}
+    .muted {{ color: #6b7280; font-size: 0.9rem; }}
+    .feedback {{ padding: 0.75rem; border-radius: 0.5rem; margin-bottom:
+1rem; }}
+    .ok {{ background: #ecfdf5; color: #059669; }}
+    .bad {{ background: #fef2f2; color: #dc2626; }}
+  &lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;div class=&quot;card&quot;&gt;
+    &lt;div class=&quot;progress&quot;&gt;Question {q_number} of {q_total}&lt;/div&gt;
+    &lt;h1&gt;{html.escape(question[&quot;question&quot;])}&lt;/h1&gt;
+   
+    {feedback_html}
+    &lt;form method=&quot;post&quot; action=&quot;/dev&quot;&gt;
+      &lt;input type=&quot;hidden&quot; name=&quot;action&quot; value=&quot;answer&quot;&gt;
+      &lt;ul class=&quot;options&quot;&gt;
+        {options_html}
+      &lt;/ul&gt;
+      &lt;input type=&quot;hidden&quot; name=&quot;state_json&quot;
+value=&quot;{html.escape(state_json)}&quot;&gt;
+      &lt;button class=&quot;primary&quot; type=&quot;submit&quot;&gt;Submit &amp;amp; Next&lt;/button&gt;
+    &lt;/form&gt;
+    &lt;p class=&quot;muted&quot;&gt;Your answers are not stored server-side; scoring happens
+on submit.&lt;/p&gt;
+  &lt;/div&gt;
+&lt;/body&gt;
+&lt;/html&gt;&#39;&#39;&#39;
+def render_result_page(score, total, percent):
+    &quot;&quot;&quot;Render the final results page&quot;&quot;&quot;
+    return f&#39;&#39;&#39;&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+  &lt;meta charset=&quot;utf-8&quot;&gt;
+  &lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+  &lt;title&gt;Your Score&lt;/title&gt;
+  &lt;style&gt;
+
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial,
+sans-serif; margin: 2rem; }}
+    .card {{ max-width: 720px; margin: 0 auto; padding: 1.5rem; border: 1px
+solid #e5e7eb; border-radius: 1rem; text-align: center; }}
+    h1 {{ margin-top: 0; }}
+    .score {{ font-size: 2rem; margin: 1rem 0; }}
+    .btns {{ display: flex; gap: 0.75rem; justify-content: center; }}
+    button, a.button {{ padding: 0.75rem 1rem; border: 0; border-radius:
+0.75rem; cursor: pointer; background: #111827; color: white; text-decoration:
+none; }}
+    .muted {{ color: #6b7280; font-size: 0.9rem; }}
+  &lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;div class=&quot;card&quot;&gt;
+    &lt;h1&gt;Quiz Complete! ��&lt;/h1&gt;
+    &lt;div class=&quot;score&quot;&gt;{score} / {total} ({percent}%)&lt;/div&gt;
+    &lt;div class=&quot;btns&quot;&gt;
+      &lt;a class=&quot;button&quot; href=&quot;/dev&quot;&gt;Try Again&lt;/a&gt;
+    &lt;/div&gt;
+    &lt;p class=&quot;muted&quot;&gt;Add more questions in &lt;code&gt;questions.json&lt;/code&gt; and
+restart.&lt;/p&gt;
+  &lt;/div&gt;
+&lt;/body&gt;
+&lt;/html&gt;&#39;&#39;&#39;
+def handler(event, context):
+    print(&#39;Event received:&#39;, json.dumps(event, indent=2))
+   
+    try:
+        method = event.get(&#39;httpMethod&#39;, &#39;GET&#39;)
+        path = event.get(&#39;path&#39;, &#39;/&#39;)
+       
+        # CORS headers for all responses
+        cors_headers = {
+            &#39;Access-Control-Allow-Headers&#39;: &#39;Content-Type,X-Amz-
+Date,Authorization,X-Api-Key,X-Amz-Security-Token&#39;,
+            &#39;Access-Control-Allow-Origin&#39;: &#39;*&#39;,
+            &#39;Access-Control-Allow-Methods&#39;: &#39;OPTIONS,POST,GET&#39;
+        }
+       
+        # Handle OPTIONS requests for CORS preflight
+        if method == &#39;OPTIONS&#39;:
+            return {
+                &#39;statusCode&#39;: 200,
+                &#39;headers&#39;: cors_headers,
+                &#39;body&#39;: &#39;&#39;
+            }
+       
+        # Homepage - GET request
+        if method == &#39;GET&#39; and path == &#39;/&#39;:
+            all_qs = load_questions()
+            total_available = len(all_qs)
+            html_content = render_homepage(total_available)
+           
+            return {
+
+                &#39;statusCode&#39;: 200,
+                &#39;headers&#39;: {
+                    &#39;Content-Type&#39;: &#39;text/html&#39;,
+                    **cors_headers
+                },
+                &#39;body&#39;: html_content
+            }
+       
+        # Handle POST requests to root path
+        elif method == &#39;POST&#39; and path == &#39;/&#39;:
+            # Parse form data
+            body = event.get(&#39;body&#39;, &#39;&#39;)
+            if event.get(&#39;isBase64Encoded&#39;):
+                import base64
+                body = base64.b64decode(body).decode(&#39;utf-8&#39;)
+           
+            form_data = parse_qs(body)
+            action = form_data.get(&#39;action&#39;, [&#39;&#39;])[0]
+           
+            # Start quiz
+            if action == &#39;start&#39;:
+                num_questions = int(form_data.get(&#39;num_questions&#39;, [2])[0])
+               
+                all_qs = load_questions()
+                n = max(1, min(num_questions, len(all_qs)))
+                selected = random.sample(all_qs, n)
+                # Shuffle options per question while tracking the new correct
+index
+                prepared = []
+                for q in selected:
+                    idxs = list(range(4))
+                    random.shuffle(idxs)
+                    options_shuffled = [q[&quot;options&quot;][i] for i in idxs]
+                    correct_index_new = idxs.index(q[&quot;answer_index&quot;])
+                    prepared.append({
+                        &quot;id&quot;: q[&quot;id&quot;],
+                        &quot;question&quot;: q[&quot;question&quot;],
+                        &quot;options&quot;: options_shuffled,
+                        &quot;answer_index&quot;: correct_index_new
+                    })
+                # Encode state into a compact dict
+                state = {
+                    &quot;questions&quot;: prepared,
+                    &quot;index&quot;: 0,
+                    &quot;score&quot;: 0
+                }
+               
+                # Render first question
+                q = state[&quot;questions&quot;][0]
+                state_str = json.dumps(state)
+               
+html_content = render_question_page(q, 1, len(state[&quot;questions&quot;]), state_str)
+               
+                return {
+
+                    &#39;statusCode&#39;: 200,
+                    &#39;headers&#39;: {
+                        &#39;Content-Type&#39;: &#39;text/html&#39;,
+                        **cors_headers
+                    },
+                    &#39;body&#39;: html_content
+                }
+           
+            # Answer submission
+            elif action == &#39;answer&#39;:
+                state_json = form_data.get(&#39;state_json&#39;, [&#39;&#39;])[0]
+                selected = int(form_data.get(&#39;selected&#39;, [0])[0])
+               
+                state = json.loads(state_json)
+                idx = state[&quot;index&quot;]
+                q = state[&quot;questions&quot;][idx]
+                correct = (int(selected) == int(q[&quot;answer_index&quot;]))
+                if correct:
+                    state[&quot;score&quot;] += 1
+                # Advance to next question or show result
+                if idx + 1 &lt; len(state[&quot;questions&quot;]):
+                    state[&quot;index&quot;] = idx + 1
+                    next_q = state[&quot;questions&quot;][state[&quot;index&quot;]]
+                    state_str = json.dumps(state)
+                    html_content = render_question_page(next_q,
+state[&quot;index&quot;] + 1, len(state[&quot;questions&quot;]), state_str)
+                   
+                    return {
+                        &#39;statusCode&#39;: 200,
+                        &#39;headers&#39;: {
+                            &#39;Content-Type&#39;: &#39;text/html&#39;,
+                    **cors_headers
+                        },
+                        &#39;body&#39;: html_content
+                    }
+                else:
+                    # Show results
+                    total = len(state[&quot;questions&quot;])
+                    score = state[&quot;score&quot;]
+                   
+percent = round((score / total) * 100, 2) if total else 0.0
+                    html_content = render_result_page(score, total, percent)
+                   
+                    return {
+                        &#39;statusCode&#39;: 200,
+                        &#39;headers&#39;: {
+                            &#39;Content-Type&#39;: &#39;text/html&#39;,
+                    **cors_headers
+                        },
+                        &#39;body&#39;: html_content
+                    }
+       
+        # Handle /start path - POST request to start quiz
+        elif method == &#39;POST&#39; and path == &#39;/start&#39;:
+
+            # Parse form data
+            body = event.get(&#39;body&#39;, &#39;&#39;)
+            if event.get(&#39;isBase64Encoded&#39;):
+                import base64
+                body = base64.b64decode(body).decode(&#39;utf-8&#39;)
+           
+            form_data = parse_qs(body)
+            num_questions = int(form_data.get(&#39;num_questions&#39;, [2])[0])
+           
+            all_qs = load_questions()
+            n = max(1, min(num_questions, len(all_qs)))
+            selected = random.sample(all_qs, n)
+            # Shuffle options per question while tracking the new correct
+index
+            prepared = []
+            for q in selected:
+                idxs = list(range(4))
+                random.shuffle(idxs)
+                options_shuffled = [q[&quot;options&quot;][i] for i in idxs]
+                correct_index_new = idxs.index(q[&quot;answer_index&quot;])
+                prepared.append({
+                    &quot;id&quot;: q[&quot;id&quot;],
+                    &quot;question&quot;: q[&quot;question&quot;],
+                    &quot;options&quot;: options_shuffled,
+                    &quot;answer_index&quot;: correct_index_new
+                })
+            # Return quiz data as JSON for frontend
+            quiz_data = {
+                &quot;questions&quot;: prepared,
+                &quot;total&quot;: len(prepared),
+                &quot;total_available&quot;: len(all_qs)  # Total questions in database
+            }
+           
+            return {
+                &#39;statusCode&#39;: 200,
+                &#39;headers&#39;: {
+                    &#39;Content-Type&#39;: &#39;application/json&#39;,
+                    **cors_headers
+                },
+                &#39;body&#39;: json.dumps(quiz_data)
+            }
+       
+        # 404 for other paths
+        return {
+            &#39;statusCode&#39;: 404,
+            &#39;headers&#39;: {
+                &#39;Content-Type&#39;: &#39;application/json&#39;,
+                    **cors_headers
+            },
+            &#39;body&#39;: json.dumps({&#39;message&#39;: &#39;Path not found&#39;, &#39;path&#39;: path})
+        }
+       
+    except Exception as e:
+        print(f&quot;Error: {str(e)}&quot;)
+
+        return {
+            &#39;statusCode&#39;: 500,
+            &#39;headers&#39;: {
+                &#39;Content-Type&#39;: &#39;application/json&#39;,
+                    **cors_headers
+            },
+            &#39;body&#39;: json.dumps({&#39;message&#39;: &#39;Internal server
+error&#39;, &#39;error&#39;: str(e)})
+        }

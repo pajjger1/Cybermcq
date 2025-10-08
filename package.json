@@ -1,0 +1,54 @@
+{
+  "name": "mcq-quiz-amplify-gen2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest",
+    "seed:questions": "ts-node --swc scripts/seed-questions.ts --region eu-west-2",
+    "seed:graphql": "ts-node --swc scripts/seed-graphql.ts",
+    "seed:enhanced": "node scripts/seed-enhanced.cjs",
+    "sandbox:win": "set AWS_REGION=eu-west-2&& set AWS_DEFAULT_REGION=eu-west-2&& npx ampx sandbox --once",
+    "sandbox:unix": "AWS_REGION=eu-west-2 AWS_DEFAULT_REGION=eu-west-2 npx ampx sandbox --once",
+    "sandbox": "npm run -s sandbox:win || npm run -s sandbox:unix"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@aws-amplify/backend": "^1.16.1",
+    "@aws-amplify/backend-cli": "^1.8.0",
+    "@aws-amplify/cli": "^14.0.2",
+    "@aws-amplify/ui-react": "^6.3.6",
+    "@swc/core": "^1.13.5",
+    "aws-amplify": "^6.3.2",
+    "next": "^15.5.4",
+    "node-fetch": "^3.3.2",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-hook-form": "^7.53.0",
+    "yup": "^1.4.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.0.0",
+    "@types/node": "^20.14.12",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/yup": "^0.32.0",
+    "autoprefixer": "^10.4.20",
+    "cross-env": "^7.0.3",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.11",
+    "postcss": "^8.4.47",
+    "prettier": "^3.3.3",
+    "tailwindcss": "^3.4.13",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.2",
+    "vitest": "^3.2.4"
+  }
+}
