@@ -64,7 +64,17 @@ export default function SignInPage() {
   ensureAmplifyConfigured();
 
   return (
-    <main className="min-h-screen grid place-items-center p-6">
+    <main className="relative min-h-screen grid place-items-center p-6">
+      <Link
+        href="/"
+        className="absolute left-4 top-4 inline-flex items-center gap-2 rounded-md bg-white/80 px-3 py-1.5 text-sm font-medium text-slate-700 shadow hover:bg-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-600"
+        aria-label="Go back to home"
+      >
+        <span aria-hidden>
+          ←
+        </span>
+        <span>Home</span>
+      </Link>
       <div className="w-full max-w-md">
         <Authenticator
           signUpAttributes={[]}

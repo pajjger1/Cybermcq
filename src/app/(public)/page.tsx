@@ -4,6 +4,7 @@ import Link from "next/link";
 import { ensureAmplifyConfigured } from "@/lib/amplifyClient";
 import { generateClient } from "aws-amplify/data";
 import type { Schema } from "@/amplify/data/resource";
+import { fetchAuthSession, getCurrentUser } from "aws-amplify/auth";
 
 type Subject = {
   subjectId: string;
@@ -37,6 +38,9 @@ export default function PublicPage() {
   const [quiz, setQuiz] = useState<QuizQuestion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [availableQuestions, setAvailableQuestions] = useState<number>(0);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [userEmail, setUserEmail] = useState<string>("");
+  const [role, setRole] = useState<string>("User");
   
   // Quiz state management
   const [quizState, setQuizState] = useState<QuizState>('setup');
@@ -59,6 +63,34 @@ export default function PublicPage() {
       }
     })();
   }, [client]);
+
+  // Determine authentication state, user email, and role from Cognito group
+  useEffect(() => {
+    (async () => {
+      try {
+        const currentUser = await getCurrentUser();
+        const session = await fetchAuthSession();
+        const idPayload: any = session?.tokens?.idToken?.payload ?? {};
+        const groups: string[] = (idPayload?.["cognito:groups"] as string[]) || [];
+        const emailFromToken: string | undefined = idPayload?.email as string | undefined;
+        const emailFallback: string = (currentUser as any)?.signInDetails?.loginId || currentUser?.username || "";
+
+        setIsAuthenticated(true);
+        setUserEmail(emailFromToken || emailFallback);
+        if (groups.includes("Admin")) {
+          setRole("Admin");
+        } else if (groups.length > 0) {
+          setRole(groups[0]);
+        } else {
+          setRole("User");
+        }
+      } catch {
+        setIsAuthenticated(false);
+        setUserEmail("");
+        setRole("User");
+      }
+    })();
+  }, []);
 
   // Update available question count when subject changes
   useEffect(() => {
@@ -154,17 +186,17 @@ export default function PublicPage() {
     
     setUserAnswers(prev => [...prev, userAnswer]);
     setShowFeedback(true);
-    
-    // Auto-advance to next question after 1.5 seconds
-    setTimeout(() => {
-      if (currentQuestionIndex < quiz.length - 1) {
-        setCurrentQuestionIndex(prev => prev + 1);
-        setSelectedAnswer(null);
-        setShowFeedback(false);
-      } else {
-        setQuizState('completed');
-      }
-    }, 1500);
+  }
+
+  function goToNextQuestion() {
+    if (!quiz) return;
+    if (currentQuestionIndex < quiz.length - 1) {
+      setCurrentQuestionIndex(prev => prev + 1);
+      setSelectedAnswer(null);
+      setShowFeedback(false);
+    } else {
+      setQuizState('completed');
+    }
   }
 
   function resetQuiz() {
@@ -190,13 +222,28 @@ export default function PublicPage() {
 
   return (
     <main className="min-h-screen grid place-items-center p-6">
-      <div className="fixed top-4 right-4">
-        <Link
-          href="/auth/sign-in"
-          className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
-        >
-          Sign In
-        </Link>
+      <div className="fixed top-4 right-4 flex items-center gap-3">
+        {isAuthenticated ? (
+          <>
+            <div className="hidden sm:block text-right leading-tight">
+              <div className="text-sm font-medium">Welcome, {userEmail}</div>
+              <div className="text-xs opacity-90">{role}</div>
+            </div>
+            <Link
+              href="/admin"
+              className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
+            >
+              ADMIN
+            </Link>
+          </>
+        ) : (
+          <Link
+            href="/auth/sign-in"
+            className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
+          >
+            Sign In
+          </Link>
+        )}
       </div>
       <div className="w-full max-w-xl bg-white text-gray-900 rounded-3xl shadow-xl/20 shadow-black/30 p-8">
         <div className="flex items-center justify-center gap-2">
@@ -309,6 +356,15 @@ export default function PublicPage() {
                     </div>
                   )}
                 </div>
+              )}
+
+              {showFeedback && (
+                <button
+                  onClick={goToNextQuestion}
+                  className="mt-4 w-full rounded-xl px-5 py-3 text-white font-medium bg-gradient-to-r from-purple-500 to-indigo-500 shadow-lg shadow-purple-500/30"
+                >
+                  {currentQuestionIndex < (quiz?.length ?? 0) - 1 ? 'Next Question' : 'See Results'}
+                </button>
               )}
 
               {selectedAnswer !== null && !showFeedback && (

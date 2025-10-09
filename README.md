@@ -60,3 +60,10 @@ git restore -SW :/
 # or
 git checkout -- <file>
 ```
+
+## Changelog
+
+### 2025-10-09
+- Sign-in page: added accessible top-left "Home" button that routes to `/`.
+- Home page header: when authenticated, hide "Sign In" and show `ADMIN` button with user context — displays "Welcome, {email}" and `{role}` (derived from Cognito groups). When not authenticated, still shows "Sign In".
+- Quiz UX: replaced auto-advance after feedback with an explicit button — shows "Next Question" until the last item, then "See Results".
