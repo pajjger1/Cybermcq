@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import Link from "next/link";
 import { ensureAmplifyConfigured } from "@/lib/amplifyClient";
 import { generateClient } from "aws-amplify/data";
@@ -40,6 +40,7 @@ export default function PublicPage() {
   const [availableQuestions, setAvailableQuestions] = useState<number>(0);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [userEmail, setUserEmail] = useState<string>("");
+  const [userId, setUserId] = useState<string>("");
   const [role, setRole] = useState<string>("User");
   
   // Quiz state management
@@ -48,6 +49,7 @@ export default function PublicPage() {
   const [userAnswers, setUserAnswers] = useState<UserAnswer[]>([]);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
   const [showFeedback, setShowFeedback] = useState<boolean>(false);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -77,6 +79,7 @@ export default function PublicPage() {
 
         setIsAuthenticated(true);
         setUserEmail(emailFromToken || emailFallback);
+        setUserId(currentUser.userId);
         if (groups.includes("Admin")) {
           setRole("Admin");
         } else if (groups.length > 0) {
@@ -87,60 +90,213 @@ export default function PublicPage() {
       } catch {
         setIsAuthenticated(false);
         setUserEmail("");
+        setUserId("");
         setRole("User");
       }
     })();
   }, []);
 
+  // Helper: fetch all questions across pages (optionally filtered by subject)
+  const listAllQuestions = useCallback(async (subjectFilter?: string) => {
+    const all: any[] = [];
+    let nextToken: string | undefined = undefined;
+    do {
+      const args: any = {};
+      if (subjectFilter) args.filter = { subjectId: { eq: subjectFilter } };
+      if (nextToken) args.nextToken = nextToken;
+      const res: any = await client.models.QuizQuestion.list(args);
+      all.push(...(res.data || []));
+      nextToken = res.nextToken as string | undefined;
+    } while (nextToken);
+    // Deduplicate and keep only valid questions
+    const uniqueMap = new Map<string, any>();
+    for (const q of all) {
+      if (!uniqueMap.has(q.questionId)) uniqueMap.set(q.questionId, q);
+    }
+    const unique = Array.from(uniqueMap.values());
+    const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
+    return valid;
+  }, [client]);
+
   // Update available question count when subject changes
   useEffect(() => {
     (async () => {
       try {
-        const filter = subjectId ? { subjectId: { eq: subjectId } } : undefined;
-        const { data: questionsData } = await client.models.QuizQuestion.list(filter ? { filter } : {});
-        // Deduplicate by questionId and keep only questions with a valid correct answer
-        const uniqueMap = new Map<string, typeof questionsData[number]>();
-        for (const q of questionsData) {
-          if (!uniqueMap.has(q.questionId)) uniqueMap.set(q.questionId, q);
-        }
-        const unique = Array.from(uniqueMap.values());
-        const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
+        const valid = await listAllQuestions(subjectId || undefined);
         setAvailableQuestions(valid.length);
       } catch (e: any) {
         console.error("Failed to count questions:", e);
         setAvailableQuestions(0);
       }
     })();
-  }, [subjectId, client]);
+  }, [subjectId, client, listAllQuestions]);
 
   const selectedSubject = useMemo(
     () => subjects.find((s) => s.subjectId === subjectId) || null,
     [subjects, subjectId]
   );
 
+  async function saveUserProgress(question: QuizQuestion, selectedIndex: number, isCorrect: boolean) {
+    try {
+      const result = await client.models.UserProgress.create({
+        userId: userId,
+        subjectId: subjectId || 'general',
+        questionId: question.questionId,
+        sessionId: currentSessionId,
+        isCorrect: isCorrect,
+        selectedAnswer: question.options[selectedIndex],
+        correctAnswer: question.options[question.answerIndex],
+        difficulty: 'medium', // Default difficulty
+        timestamp: new Date().toISOString()
+      }, { authMode: 'userPool' });
+      
+      console.log('Progress saved successfully for question:', question.questionId);
+    } catch (error) {
+      console.error('Failed to save user progress:', error);
+    }
+  }
+
+  async function createQuizSession() {
+    if (!isAuthenticated || !userId) return null;
+    
+    try {
+      const sessionData = await client.models.QuizSession.create({
+        userId,
+        subjectId: subjectId || null,
+        subjectName: selectedSubject?.subjectName || 'Mixed Topics',
+        questionCount: count,
+        score: 0,
+        accuracy: 0,
+        startTime: new Date().toISOString(),
+        completed: false
+      }, { authMode: 'userPool' });
+      
+      console.log('Session created with ID:', sessionData.data?.id);
+      return sessionData.data?.id || null;
+    } catch (error) {
+      console.error('Failed to create quiz session:', error);
+      return null;
+    }
+  }
+
+  async function completeQuizSession() {
+    if (!currentSessionId || !isAuthenticated) return;
+    
+    try {
+      const score = userAnswers.filter(answer => answer.isCorrect).length;
+      const accuracy = userAnswers.length > 0 ? (score / userAnswers.length) * 100 : 0;
+      
+      const result = await client.models.QuizSession.update({
+        id: currentSessionId,
+        score,
+        accuracy,
+        endTime: new Date().toISOString(),
+        completed: true
+      }, { authMode: 'userPool' });
+      
+      console.log('Session completed with score:', score, '/', userAnswers.length);
+    } catch (error) {
+      console.error('Failed to complete quiz session:', error);
+    }
+  }
+
+  async function updateSubjectStats() {
+    if (!isAuthenticated || !userId) return;
+    
+    try {
+      const effectiveSubjectId = subjectId || 'general';
+      
+      // Get all user progress for this subject to calculate stats
+      const { data: progressData } = await client.models.UserProgress.list({
+        filter: { 
+          userId: { eq: userId },
+          subjectId: { eq: effectiveSubjectId }
+        },
+        authMode: 'userPool'
+      });
+
+      // Get all sessions for this subject to calculate session stats
+      const { data: sessionData } = await client.models.QuizSession.list({
+        filter: {
+          userId: { eq: userId },
+          subjectId: subjectId ? { eq: subjectId } : { attributeExists: false },
+          completed: { eq: true }
+        },
+        authMode: 'userPool'
+      });
+
+      const totalQuestions = progressData.length;
+      const correctAnswers = progressData.filter(p => p.isCorrect).length;
+      const accuracy = totalQuestions > 0 ? (correctAnswers / totalQuestions) * 100 : 0;
+      const lastAttempted = new Date().toISOString();
+      
+      const totalSessions = sessionData.length;
+      const bestScore = sessionData.length > 0 ? Math.max(...sessionData.map(s => s.score)) : 0;
+      const averageScore = sessionData.length > 0 ? sessionData.reduce((sum, s) => sum + s.score, 0) / sessionData.length : 0;
+
+      // Get subject name
+      const subject = subjects.find(s => s.subjectId === subjectId);
+      const subjectName = subject?.subjectName || 'Mixed Topics';
+
+      // Check if stats record already exists
+      const { data: existingStats } = await client.models.UserSubjectStats.list({
+        filter: {
+          userId: { eq: userId },
+          subjectId: { eq: effectiveSubjectId }
+        },
+        authMode: 'userPool'
+      });
+
+      if (existingStats && existingStats.length > 0) {
+        // Update existing stats
+        await client.models.UserSubjectStats.update({
+          id: existingStats[0].id,
+          totalQuestions,
+          correctAnswers,
+          accuracy,
+          totalSessions,
+          bestScore,
+          averageScore,
+          lastAttempted
+        }, { authMode: 'userPool' });
+        console.log('Updated stats for subject:', subjectName);
+      } else {
+        // Create new stats record
+        await client.models.UserSubjectStats.create({
+          userId,
+          subjectId: effectiveSubjectId,
+          subjectName,
+          totalQuestions,
+          correctAnswers,
+          accuracy,
+          totalSessions,
+          bestScore,
+          averageScore,
+          lastAttempted
+        }, { authMode: 'userPool' });
+        console.log('Created new stats for subject:', subjectName);
+      }
+    } catch (error) {
+      console.error('Failed to update subject stats:', error);
+    }
+  }
+
   async function startQuiz() {
     setLoading(true);
     setError(null);
     try {
-      // Get questions from the selected subject or all subjects
-      const filter = subjectId ? { subjectId: { eq: subjectId } } : undefined;
-      const { data: questionsData } = await client.models.QuizQuestion.list(filter ? { filter } : {});
-      
-      if (questionsData.length === 0) {
-        setError("No questions found for the selected criteria");
-        return;
+      // Create quiz session if user is authenticated
+      let sessionId = null;
+      if (isAuthenticated && userId) {
+        sessionId = await createQuizSession();
+        setCurrentSessionId(sessionId);
       }
-      
-      // Deduplicate by questionId and keep only questions with a valid correct answer
-      const uniqueMap = new Map<string, typeof questionsData[number]>();
-      for (const q of questionsData) {
-        if (!uniqueMap.has(q.questionId)) uniqueMap.set(q.questionId, q);
-      }
-      const unique = Array.from(uniqueMap.values());
-      const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
+
+      // Get questions from the selected subject or all subjects (all pages)
+      const valid = await listAllQuestions(subjectId || undefined);
 
       if (valid.length === 0) {
-        setError("No valid questions available");
+        setError("No questions found for the selected criteria");
         return;
       }
 
@@ -186,9 +342,14 @@ export default function PublicPage() {
     
     setUserAnswers(prev => [...prev, userAnswer]);
     setShowFeedback(true);
+
+    // Save progress to database if user is authenticated
+    if (isAuthenticated && userId) {
+      saveUserProgress(currentQuestion, selectedAnswer, isCorrect);
+    }
   }
 
-  function goToNextQuestion() {
+  async function goToNextQuestion() {
     if (!quiz) return;
     if (currentQuestionIndex < quiz.length - 1) {
       setCurrentQuestionIndex(prev => prev + 1);
@@ -196,6 +357,11 @@ export default function PublicPage() {
       setShowFeedback(false);
     } else {
       setQuizState('completed');
+      // Complete session and update stats when quiz is completed
+      if (isAuthenticated && userId) {
+        await completeQuizSession();
+        await updateSubjectStats();
+      }
     }
   }
 
@@ -206,6 +372,7 @@ export default function PublicPage() {
     setUserAnswers([]);
     setSelectedAnswer(null);
     setShowFeedback(false);
+    setCurrentSessionId(null);
     setError(null);
   }
 
@@ -230,19 +397,35 @@ export default function PublicPage() {
               <div className="text-xs opacity-90">{role}</div>
             </div>
             <Link
-              href="/admin"
-              className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
+              href="/dashboard"
+              className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-blue-600 to-cyan-600 shadow-lg shadow-blue-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-blue-400"
             >
-              ADMIN
+              Dashboard
             </Link>
+            {role === "Admin" && (
+              <Link
+                href="/admin"
+                className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
+              >
+                ADMIN
+              </Link>
+            )}
           </>
         ) : (
-          <Link
-            href="/auth/sign-in"
-            className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
-          >
-            Sign In
-          </Link>
+          <div className="flex gap-2">
+            <Link
+              href="/auth/sign-up"
+              className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-green-600 to-emerald-600 shadow-lg shadow-green-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-green-400"
+            >
+              Sign Up
+            </Link>
+            <Link
+              href="/auth/sign-in"
+              className="rounded-xl px-4 py-2 text-white font-medium bg-gradient-to-r from-purple-700 to-indigo-700 shadow-lg shadow-purple-500/30 hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-purple-400"
+            >
+              Sign In
+            </Link>
+          </div>
         )}
       </div>
       <div className="w-full max-w-xl bg-white text-gray-900 rounded-3xl shadow-xl/20 shadow-black/30 p-8">
@@ -298,6 +481,23 @@ export default function PublicPage() {
             <p className="text-center text-gray-500 mt-6 text-sm">
               Challenge yourself with randomly selected questions from our question bank!
             </p>
+            
+            {!isAuthenticated && (
+              <div className="mt-6 p-4 bg-gradient-to-r from-purple-50 to-indigo-50 rounded-xl border border-purple-200">
+                <div className="text-center">
+                  <h3 className="text-lg font-semibold text-purple-700 mb-2">Track Your Progress!</h3>
+                  <p className="text-sm text-purple-600 mb-3">
+                    Sign up to track your performance across subjects, see detailed analytics, and get personalized improvement suggestions.
+                  </p>
+                  <Link
+                    href="/auth/sign-up"
+                    className="inline-block px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white font-medium rounded-lg transition-colors"
+                  >
+                    Create Free Account
+                  </Link>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

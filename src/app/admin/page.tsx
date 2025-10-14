@@ -95,10 +95,47 @@ export default function AdminPage() {
   const [showNewSubjectModal, setShowNewSubjectModal] = useState(false);
   const [showNewQuestionModal, setShowNewQuestionModal] = useState(false);
   const [showInlineQuestionForm, setShowInlineQuestionForm] = useState(false);
+  const [showBulkUploadModal, setShowBulkUploadModal] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvPreview, setCsvPreview] = useState<any[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<{
+    status: 'idle' | 'parsing' | 'uploading' | 'complete' | 'error';
+    message?: string;
+    results?: any;
+  }>({ status: 'idle' });
 
   // Data
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
+  // Fetch all questions with pagination (Amplify Data returns pages)
+  const listAllQuestions = useCallback(async (): Promise<Question[]> => {
+    const aggregated: Question[] = [];
+    let nextToken: string | undefined = undefined;
+    do {
+      const args: any = {};
+      if (nextToken) args.nextToken = nextToken;
+      const res: any = await client.models.QuizQuestion.list(args);
+      const page: Question[] = (res.data || []).map((q: any) => ({
+        questionId: q.questionId,
+        question: q.question,
+        options: q.options,
+        answerIndex: q.options.indexOf(q.correctAnswer),
+        subjectId: q.subjectId,
+        tags: []
+      }));
+      aggregated.push(...page);
+      nextToken = res.nextToken as string | undefined;
+    } while (nextToken);
+
+    // Deduplicate by questionId just in case
+    const unique = aggregated.reduce((acc, current) => {
+      const exists = acc.find((x) => x.questionId === current.questionId);
+      if (!exists) acc.push(current);
+      return acc;
+    }, [] as Question[]);
+
+    return unique;
+  }, [client]);
 
   // Forms
   const [subjectForm, setSubjectForm] = useState<{ subjectId?: string; subjectName: string; slug: string; description?: string; links?: string }>({ subjectName: "", slug: "" });
@@ -215,29 +252,10 @@ export default function AdminPage() {
       })));
     });
     
-    // Load questions
-    client.models.QuizQuestion.list({}).then(({ data }) => {
-      if (cancelled) return;
-      const questionsData = data.map(q => ({
-        questionId: q.questionId,
-        question: q.question,
-        options: q.options,
-        answerIndex: q.options.indexOf(q.correctAnswer),
-        subjectId: q.subjectId,
-        tags: []
-      }));
-      
-      // Remove duplicates based on questionId
-      const uniqueQuestions = questionsData.reduce((acc, current) => {
-        const existingIndex = acc.findIndex(item => item.questionId === current.questionId);
-        if (existingIndex === -1) {
-          acc.push(current);
-        }
-        return acc;
-      }, [] as Question[]);
-      
-      setQuestions(uniqueQuestions);
-    }).catch((error) => { console.error("Failed to load questions:", error); });
+    // Load questions (all pages)
+    listAllQuestions()
+      .then((uniqueQuestions) => { if (!cancelled) setQuestions(uniqueQuestions); })
+      .catch((error) => { console.error("Failed to load questions:", error); });
 
     return () => { cancelled = true; };
   }, [isAdmin, client]);
@@ -474,6 +492,215 @@ export default function AdminPage() {
     setShowInlineQuestionForm(false);
   }
 
+  function parseCSV(text: string): any[] {
+    const lines = text.trim().split('\n');
+    if (lines.length < 2) throw new Error('CSV must have at least a header and one data row');
+    
+    const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+    const expectedHeaders = ['question', 'option1', 'option2', 'option3', 'option4', 'answer_index', 'subject', 'difficulty'];
+    
+    // Validate headers
+    const missingHeaders = expectedHeaders.filter(h => !headers.includes(h));
+    if (missingHeaders.length > 0) {
+      throw new Error(`Missing required headers: ${missingHeaders.join(', ')}`);
+    }
+    
+    const data = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue; // Skip empty lines
+      
+      // Simple CSV parsing - handles quoted fields
+      const values = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let j = 0; j < line.length; j++) {
+        const char = line[j];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          values.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current.trim()); // Add the last value
+      
+      if (values.length !== headers.length) {
+        throw new Error(`Row ${i + 1}: Expected ${headers.length} columns, got ${values.length}`);
+      }
+      
+      const row: any = {};
+      headers.forEach((header, index) => {
+        row[header] = values[index].replace(/^"|"$/g, ''); // Remove surrounding quotes
+      });
+      
+      // Validate and transform to API format
+      if (!row.question || !row.option1 || !row.option2 || !row.option3 || !row.option4) {
+        throw new Error(`Row ${i + 1}: Question and all options are required`);
+      }
+      
+      const answerIndex = parseInt(row.answer_index);
+      if (isNaN(answerIndex) || answerIndex < 0 || answerIndex > 3) {
+        throw new Error(`Row ${i + 1}: answer_index must be 0, 1, 2, or 3`);
+      }
+      
+      if (!row.subject || !row.subject.trim()) {
+        throw new Error(`Row ${i + 1}: subject is required`);
+      }
+      
+      const question = {
+        question: row.question.trim(),
+        options: [row.option1.trim(), row.option2.trim(), row.option3.trim(), row.option4.trim()],
+        answerIndex: answerIndex,
+        subject: row.subject.trim(),
+        difficulty: row.difficulty?.trim() || 'MEDIUM'
+      };
+      
+      data.push(question);
+    }
+    
+    return data;
+  }
+
+  async function handleCSVUpload() {
+    if (!csvFile) return;
+    
+    try {
+      setUploadProgress({ status: 'parsing', message: 'Parsing CSV file...' });
+      
+      const text = await csvFile.text();
+      const questions = parseCSV(text);
+      
+      setUploadProgress({ status: 'uploading', message: 'Creating subjects and uploading questions...' });
+      
+      // Group questions by subject for summary
+      const subjectGroups = questions.reduce((acc, q) => {
+        if (!acc[q.subject]) acc[q.subject] = [];
+        acc[q.subject].push(q);
+        return acc;
+      }, {} as Record<string, any[]>);
+      
+      // Create subjects that don't exist
+      const existingSubjects = new Map(subjects.map(s => [s.subjectName, s]));
+      const createdSubjects = [];
+      
+      for (const subjectName of Object.keys(subjectGroups)) {
+        if (!existingSubjects.has(subjectName)) {
+          const slug = subjectName.toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-');
+          const availableSlug = await findAvailableSlug(slug);
+          
+          try {
+            const { data } = await client.models.QuizSubject.create({
+              subjectId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+              subjectName,
+              slug: availableSlug,
+              description: `Questions for ${subjectName}`
+            });
+            
+            if (data) {
+              const newSubject = {
+                subjectId: (data as any).subjectId,
+                subjectName: (data as any).subjectName,
+                slug: (data as any).slug
+              };
+              existingSubjects.set(subjectName, newSubject);
+              createdSubjects.push(subjectName);
+            }
+          } catch (error: any) {
+            console.error(`Failed to create subject ${subjectName}:`, error);
+          }
+        }
+      }
+      
+      // Upload questions via GraphQL
+      let successful = 0;
+      let skipped = 0;
+      let errors = 0;
+      const errorDetails = [];
+      
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        const subject = existingSubjects.get(q.subject);
+        
+        if (!subject) {
+          errors++;
+          errorDetails.push(`Question ${i + 1}: Subject "${q.subject}" not found`);
+          continue;
+        }
+        
+        try {
+          const correctAnswer = q.options[q.answerIndex];
+          await client.models.QuizQuestion.create({
+            questionId: `${Date.now()}-${Math.random().toString(16).slice(2, 10)}-${i}`,
+            question: q.question,
+            options: q.options,
+            correctAnswer,
+            subjectId: subject.subjectId,
+            explanation: `The correct answer is: ${correctAnswer}`,
+            difficulty: q.difficulty
+          });
+          successful++;
+        } catch (error: any) {
+          if (error.message.includes('already exists') || error.message.includes('ConditionalCheckFailedException')) {
+            skipped++;
+          } else {
+            errors++;
+            errorDetails.push(`Question ${i + 1}: ${error.message}`);
+          }
+        }
+      }
+      
+      setUploadProgress({ 
+        status: 'complete', 
+        message: `Upload complete! ${successful} questions created${createdSubjects.length > 0 ? `, ${createdSubjects.length} new subjects created` : ''}.`,
+        results: {
+          successful,
+          skipped,
+          errors,
+          processed: questions.length,
+          created_subjects: createdSubjects,
+          error_details: errorDetails,
+          subjectGroups: Object.keys(subjectGroups).map(subject => ({
+            subject,
+            count: subjectGroups[subject].length
+          }))
+        }
+      });
+      
+      // Refresh data
+      // Reload subjects
+      client.models.QuizSubject.list({}).then(({ data }) => {
+        setSubjects(data.map(s => ({
+          subjectId: s.subjectId,
+          subjectName: s.subjectName,
+          slug: (s as any).slug,
+          links: (s as any).links || [],
+          description: s.description || undefined
+        })));
+      });
+      
+      // Reload questions (all pages)
+      const reload = async () => {
+        try {
+          const uniqueQuestions = await listAllQuestions();
+          setQuestions(uniqueQuestions);
+        } catch (e) {
+          console.error('Reload questions failed:', e);
+        }
+      };
+      reload();
+      
+    } catch (error: any) {
+      setUploadProgress({ 
+        status: 'error', 
+        message: `Error: ${error.message}` 
+      });
+    }
+  }
+
   async function deleteQuestion(id: string) {
     if (!confirm("Delete question?")) return;
     // Find the question by questionId to get the actual id
@@ -635,6 +862,40 @@ export default function AdminPage() {
               aria-label="Create new question"
             >
               + New Question
+            </button>
+            <button 
+              onClick={() => setShowBulkUploadModal(true)}
+              style={{ 
+                padding: '0.875rem 1.5rem', 
+                border: '2px solid #059669', 
+                borderRadius: '16px', 
+                cursor: 'pointer', 
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', 
+                color: 'white',
+                fontSize: '0.95rem',
+                fontWeight: '600',
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                textShadow: '1px 1px 2px rgba(0,0,0,0.3)',
+                boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)';
+                e.currentTarget.style.boxShadow = '0 8px 25px rgba(16, 185, 129, 0.4)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0px)';
+                e.currentTarget.style.boxShadow = '0 4px 15px rgba(16, 185, 129, 0.3)';
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.outline = '3px solid rgba(16, 185, 129, 0.5)';
+                e.currentTarget.style.outlineOffset = '2px';
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.outline = 'none';
+              }}
+              aria-label="Bulk upload questions from CSV"
+            >
+              📤 Bulk Upload CSV
             </button>
             <button 
               onClick={() => router.push("/")}
@@ -1547,6 +1808,171 @@ export default function AdminPage() {
                 Cancel
               </button>
             </div>
+          </div>
+        </Modal>
+
+        {/* Bulk Upload Modal */}
+        <Modal 
+          isOpen={showBulkUploadModal} 
+          onClose={() => {
+            setShowBulkUploadModal(false);
+            setCsvFile(null);
+            setCsvPreview([]);
+            setUploadProgress({ status: 'idle' });
+          }}
+          title="Bulk Upload Questions from CSV"
+        >
+          <div className="space-y-4">
+            <div>
+              <h3 className="font-medium text-black mb-2">CSV Format Required:</h3>
+              <div className="bg-gray-50 p-3 rounded text-sm font-mono text-xs text-black">
+                question,option1,option2,option3,option4,answer_index,subject,difficulty<br/>
+                "What is 2+2?","2","3","4","5",2,"Math","EASY"
+              </div>
+              <p className="text-sm text-black mt-2">
+                • <strong className="text-black">answer_index:</strong> 0-3 (0=option1, 1=option2, etc.)<br/>
+                • <strong className="text-black">subject:</strong> Questions will be grouped by subject (subjects created automatically)<br/>
+                • <strong className="text-black">difficulty:</strong> EASY, MEDIUM, or HARD<br/>
+                • <strong className="text-black">Download template:</strong> <a href="/question-template.csv" download className="text-blue-600 underline font-medium">question-template.csv</a>
+              </p>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-black mb-2">
+                Select CSV File
+              </label>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  setCsvFile(file || null);
+                  if (file) {
+                    file.text().then(text => {
+                      try {
+                        const preview = parseCSV(text).slice(0, 3);
+                        setCsvPreview(preview);
+                        setUploadProgress({ status: 'idle' });
+                      } catch (error: any) {
+                        setUploadProgress({ status: 'error', message: error.message });
+                        setCsvPreview([]);
+                      }
+                    });
+                  }
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100 text-black"
+              />
+            </div>
+            
+            {csvPreview.length > 0 && (
+              <div>
+                <h4 className="font-medium text-black mb-2">Preview (first 3 rows):</h4>
+                <div className="bg-gray-50 p-3 rounded text-sm max-h-40 overflow-y-auto">
+                  {csvPreview.map((q, i) => (
+                    <div key={i} className="mb-3 pb-3 border-b border-gray-200 last:border-0">
+                      <div className="font-medium text-black">Q{i+1}: {q.question}</div>
+                      <div className="text-gray-700 text-xs mt-1">
+                        Options: {q.options.join(' | ')}
+                      </div>
+                      <div className="flex gap-4 text-xs mt-1">
+                        <span className="text-green-700 font-medium">✓ Answer: {q.options[q.answerIndex]}</span>
+                        <span className="text-blue-700">Subject: {q.subject}</span>
+                        <span className="text-purple-700">Difficulty: {q.difficulty}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {uploadProgress.status !== 'idle' && (
+              <div className={`p-4 rounded-lg border ${
+                uploadProgress.status === 'error' ? 'bg-red-50 border-red-200' :
+                uploadProgress.status === 'complete' ? 'bg-green-50 border-green-200' :
+                'bg-blue-50 border-blue-200'
+              }`}>
+                <div className={`font-medium mb-1 ${
+                  uploadProgress.status === 'error' ? 'text-red-800' :
+                  uploadProgress.status === 'complete' ? 'text-green-800' :
+                  'text-blue-800'
+                }`}>{uploadProgress.message}</div>
+                {uploadProgress.results && (
+                  <div className="text-sm space-y-1">
+                    <div className="flex gap-4">
+                      <span className="text-green-700 font-medium">✅ Created: {uploadProgress.results.successful}</span>
+                      <span className="text-yellow-700 font-medium">⏭️ Skipped: {uploadProgress.results.skipped}</span>
+                      <span className="text-red-700 font-medium">❌ Errors: {uploadProgress.results.errors}</span>
+                    </div>
+                    {uploadProgress.results.created_subjects?.length > 0 && (
+                      <div className="text-blue-800 font-medium">
+                        📚 New subjects created: {uploadProgress.results.created_subjects.join(', ')}
+                      </div>
+                    )}
+                    {uploadProgress.results.error_details?.length > 0 && (
+                      <div className="mt-2">
+                        <details className="text-red-800">
+                          <summary className="cursor-pointer font-medium">View Error Details ({uploadProgress.results.error_details.length})</summary>
+                          <div className="mt-2 text-xs bg-red-100 p-2 rounded max-h-32 overflow-y-auto text-red-900">
+                            {uploadProgress.results.error_details.map((error: string, i: number) => (
+                              <div key={i} className="mb-1">{error}</div>
+                            ))}
+                          </div>
+                        </details>
+                      </div>
+                    )}
+                    {uploadProgress.results.subjectGroups && (
+                      <div className="mt-2">
+                        <strong className="text-black">Questions by subject:</strong>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                          {uploadProgress.results.subjectGroups.map((sg: any) => (
+                            <div key={sg.subject} className="text-xs text-black">
+                              {sg.subject}: {sg.count} questions
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {uploadProgress.status === 'complete' ? (
+              <div className="pt-4">
+                <button
+                  onClick={() => {
+                    setShowBulkUploadModal(false);
+                    setCsvFile(null);
+                    setCsvPreview([]);
+                    setUploadProgress({ status: 'idle' });
+                  }}
+                  className="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200"
+                >
+                  Back to Admin
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-3 pt-4">
+                <button 
+                  onClick={handleCSVUpload}
+                  disabled={!csvFile || uploadProgress.status === 'uploading'}
+                  className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200"
+                >
+                  {uploadProgress.status === 'uploading' ? 'Uploading...' : 'Upload Questions'}
+                </button>
+                <button 
+                  onClick={() => {
+                    setShowBulkUploadModal(false);
+                    setCsvFile(null);
+                    setCsvPreview([]);
+                    setUploadProgress({ status: 'idle' });
+                  }}
+                  className="px-6 py-3 border border-gray-300 hover:bg-gray-50 text-black font-medium rounded-lg transition-colors duration-200"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
         </Modal>
       </div>

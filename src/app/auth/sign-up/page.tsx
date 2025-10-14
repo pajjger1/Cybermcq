@@ -44,23 +44,23 @@ function AuthenticatedContent() {
   if (isRedirecting) {
     return (
       <div className="rounded-xl border p-6 text-center">
-        <div className="font-medium">Redirecting...</div>
-        <div className="mt-2 text-sm">Taking you to the appropriate portal...</div>
+        <div className="font-medium">Welcome! Setting up your dashboard...</div>
+        <div className="mt-2 text-sm">Taking you to your personalized quiz dashboard...</div>
       </div>
     );
   }
 
   return (
     <div className="rounded-xl border p-6">
-      <div className="font-medium">Signed in as {user?.username}</div>
+      <div className="font-medium">Account created successfully!</div>
       <div className="mt-2 text-sm">
-        Go to <Link href="/" className="text-blue-600 hover:underline">Home</Link>, <Link href="/dashboard" className="text-blue-600 hover:underline">Dashboard</Link>, or <Link href="/admin" className="text-blue-600 hover:underline">Admin</Link>.
+        Go to <Link href="/dashboard" className="text-blue-600 hover:underline">Dashboard</Link> to start tracking your progress.
       </div>
     </div>
   );
 }
 
-export default function SignInPage() {
+export default function SignUpPage() {
   ensureAmplifyConfigured();
 
   return (
@@ -76,13 +76,18 @@ export default function SignInPage() {
         <span>Home</span>
       </Link>
       <div className="w-full max-w-md">
+        <div className="text-center mb-6">
+          <h1 className="text-3xl font-bold text-white mb-2">Create Account</h1>
+          <p className="text-purple-100">Join to track your quiz progress and improve your skills</p>
+        </div>
         <Authenticator
+          initialState="signUp"
           signUpAttributes={["email"]}
           socialProviders={[]}
           components={{
             Footer: () => (
-              <div className="text-sm mt-2">
-                <Link href="/auth/forgot-password" className="text-blue-600">Forgot password?</Link>
+              <div className="text-sm mt-2 text-center">
+                Already have an account? <Link href="/auth/sign-in" className="text-blue-600">Sign In</Link>
               </div>
             ),
           }}
@@ -94,5 +99,4 @@ export default function SignInPage() {
     </main>
   );
 }
-
 

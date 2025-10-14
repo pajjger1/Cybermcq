@@ -31,6 +31,61 @@ const schema = /* GraphQL */ `
     createdAt: AWSDateTime!
     updatedAt: AWSDateTime!
   }
+
+  type QuizSession @model @auth(rules: [
+    { allow: owner, ownerField: "userId", identityClaim: "sub" },
+    { allow: groups, groups: ["Admin"] }
+  ]) {
+    id: ID!
+    userId: String! @index(name: "byUserId")
+    subjectId: String @index(name: "bySubjectId")
+    subjectName: String
+    questionCount: Int!
+    score: Int!
+    accuracy: Float!
+    startTime: AWSDateTime!
+    endTime: AWSDateTime
+    completed: Boolean!
+    createdAt: AWSDateTime!
+    updatedAt: AWSDateTime!
+  }
+
+  type UserProgress @model @auth(rules: [
+    { allow: owner, ownerField: "userId", identityClaim: "sub" },
+    { allow: groups, groups: ["Admin"] }
+  ]) {
+    id: ID!
+    userId: String! @index(name: "byUserId")
+    subjectId: String! @index(name: "bySubjectId")
+    questionId: String! @index(name: "byQuestionId")
+    sessionId: String @index(name: "bySessionId")
+    isCorrect: Boolean!
+    selectedAnswer: String!
+    correctAnswer: String!
+    difficulty: String
+    timestamp: AWSDateTime!
+    createdAt: AWSDateTime!
+    updatedAt: AWSDateTime!
+  }
+
+  type UserSubjectStats @model @auth(rules: [
+    { allow: owner, ownerField: "userId", identityClaim: "sub" },
+    { allow: groups, groups: ["Admin"] }
+  ]) {
+    id: ID!
+    userId: String! @index(name: "byUserId")
+    subjectId: String! @index(name: "bySubjectId")
+    subjectName: String!
+    totalQuestions: Int!
+    correctAnswers: Int!
+    accuracy: Float!
+    totalSessions: Int!
+    bestScore: Int!
+    averageScore: Float!
+    lastAttempted: AWSDateTime!
+    createdAt: AWSDateTime!
+    updatedAt: AWSDateTime!
+  }
 `;
 
 export const data = defineData({
@@ -40,6 +95,8 @@ export const data = defineData({
     apiKeyAuthorizationMode: {
       expiresInDays: 30,
     },
+    // Enable Cognito User Pools so owner-based rules work for signed-in users
+    userPoolAuthorizationMode: {},
   },
 });
 

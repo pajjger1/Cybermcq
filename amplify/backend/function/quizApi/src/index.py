@@ -353,6 +353,118 @@ def lambda_handler(event, context):
             })
         return _response(event, 200, {'questions': prepared, 'total': len(prepared)})
 
+    # Bulk upload questions
+    if path.endswith('/questions/bulk') and method == 'POST':
+        if not _require_admin(event):
+            return _response(event, 404, {'error': 'Not found'})
+        try:
+            payload = json.loads(body or '{}')
+            questions_data = payload.get('questions', [])
+            
+            if not questions_data or not isinstance(questions_data, list):
+                return _response(event, 400, {'error': 'questions array is required'})
+            
+            results = []
+            errors = []
+            created_subjects = []
+            
+            for i, q in enumerate(questions_data):
+                try:
+                    # Validate required fields
+                    for f in ['question', 'options', 'answerIndex', 'subject']:
+                        if f not in q:
+                            errors.append(f'Row {i+1}: Missing field: {f}')
+                            continue
+                    
+                    options = q['options']
+                    if not isinstance(options, list) or len(options) != 4 or not all(isinstance(x, str) and x.strip() for x in options):
+                        errors.append(f'Row {i+1}: options must be a list of 4 non-empty strings')
+                        continue
+                    
+                    ai = int(q['answerIndex'])
+                    if not (0 <= ai <= 3):
+                        errors.append(f'Row {i+1}: answerIndex must be 0..3')
+                        continue
+                    
+                    subject_name = str(q['subject']).strip()
+                    if not subject_name:
+                        errors.append(f'Row {i+1}: subject cannot be empty')
+                        continue
+                    
+                    # Find or create subject
+                    subject_scan = subjects_table.scan(
+                        FilterExpression=boto3.dynamodb.conditions.Attr('subjectName').eq(subject_name)
+                    )
+                    existing_subject = subject_scan.get('Items', [])
+                    
+                    if existing_subject:
+                        subject = existing_subject[0]
+                    else:
+                        # Create new subject
+                        subject_id = _gen_id()
+                        # Create slug from subject name
+                        slug = subject_name.lower().replace(' ', '-').replace('_', '-')
+                        slug = ''.join(c for c in slug if c.isalnum() or c == '-')
+                        slug = slug[:60]  # Limit length
+                        
+                        # Check if slug exists and make it unique
+                        slug_scan = subjects_table.scan(
+                            FilterExpression=boto3.dynamodb.conditions.Attr('slug').eq(slug)
+                        )
+                        if slug_scan.get('Items'):
+                            slug = f"{slug}-{int(datetime.datetime.utcnow().timestamp())}"
+                        
+                        now = _now_iso()
+                        subject = {
+                            'subjectId': subject_id,
+                            'subjectName': subject_name,
+                            'slug': slug,
+                            'description': f'Questions for {subject_name}',
+                            'createdAt': now,
+                            'updatedAt': now,
+                        }
+                        
+                        subjects_table.put_item(Item=subject)
+                        created_subjects.append(subject_name)
+                    
+                    qid = q.get('questionId') or _gen_id()
+                    now = _now_iso()
+                    
+                    item = {
+                        'questionId': qid,
+                        'question': str(q['question']).strip(),
+                        'options': options,
+                        'answerIndex': ai,
+                        'tags': q.get('tags', []),
+                        'subjectId': subject['subjectId'],
+                        'subjectName': subject['subjectName'],
+                        'createdAt': now,
+                        'updatedAt': now,
+                    }
+                    
+                    # Try to insert (skip if exists)
+                    try:
+                        questions_table.put_item(Item=item, ConditionExpression='attribute_not_exists(questionId)')
+                        results.append({'questionId': qid, 'status': 'created', 'subject': subject_name})
+                    except questions_table.meta.client.exceptions.ConditionalCheckFailedException:
+                        results.append({'questionId': qid, 'status': 'skipped', 'reason': 'already exists', 'subject': subject_name})
+                        
+                except Exception as e:
+                    errors.append(f'Row {i+1}: {str(e)}')
+            
+            return _response(event, 200, {
+                'processed': len(questions_data),
+                'successful': len([r for r in results if r['status'] == 'created']),
+                'skipped': len([r for r in results if r['status'] == 'skipped']),
+                'errors': len(errors),
+                'created_subjects': list(set(created_subjects)),
+                'results': results,
+                'error_details': errors
+            })
+            
+        except Exception as e:
+            return _response(event, 500, {'error': str(e)})
+
     return _response(event, 404, {'error': 'Route not found', 'path': path})
 
 
