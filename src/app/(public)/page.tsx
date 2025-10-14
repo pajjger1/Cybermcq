@@ -43,6 +43,25 @@ export default function PublicPage() {
   const [userId, setUserId] = useState<string>("");
   const [role, setRole] = useState<string>("User");
   
+  // Derived: parsed numeric count and validity
+  const countNumber = useMemo(() => {
+    if (countInput.trim() === "") return NaN;
+    const parsed = Number(countInput);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }, [countInput]);
+  const isCountValid = useMemo(() => {
+    return Number.isInteger(countNumber) && countNumber >= 1 && countNumber <= (availableQuestions || 0);
+  }, [countNumber, availableQuestions]);
+
+  // Keep input within dynamic bounds when subject changes
+  useEffect(() => {
+    if (countInput === "") return;
+    if (!Number.isFinite(countNumber)) return;
+    if (availableQuestions > 0 && countNumber > availableQuestions) {
+      setCountInput(String(availableQuestions));
+    }
+  }, [availableQuestions]);
+  
   // Quiz state management
   const [quizState, setQuizState] = useState<QuizState>('setup');
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
@@ -136,17 +155,6 @@ export default function PublicPage() {
     [subjects, subjectId]
   );
 
-  const parsedCount = useMemo(() => {
-    if (!/^\d+$/.test(countInput)) return NaN;
-    return Math.floor(Number(countInput));
-  }, [countInput]);
-
-  const isCountValid = useMemo(() => {
-    if (!Number.isFinite(parsedCount)) return false;
-    const n = Number(parsedCount);
-    return n >= 1 && n <= (availableQuestions || 0);
-  }, [parsedCount, availableQuestions]);
-
   async function saveUserProgress(question: QuizQuestion, selectedIndex: number, isCorrect: boolean) {
     try {
       const result = await client.models.UserProgress.create({
@@ -167,7 +175,7 @@ export default function PublicPage() {
     }
   }
 
-  async function createQuizSession() {
+  async function createQuizSession(questionCount: number) {
     if (!isAuthenticated || !userId) return null;
     
     try {
@@ -175,15 +183,16 @@ export default function PublicPage() {
         userId,
         subjectId: subjectId || null,
         subjectName: selectedSubject?.subjectName || 'Mixed Topics',
-        questionCount: Number.isFinite(parsedCount) ? Number(parsedCount) : 0,
+        questionCount,
         score: 0,
         accuracy: 0,
         startTime: new Date().toISOString(),
         completed: false
       }, { authMode: 'userPool' });
       
-      console.log('Session created with ID:', sessionData.data?.id);
-      return sessionData.data?.id || null;
+      const newId = (sessionData as unknown as { data?: { id?: string } })?.data?.id;
+      console.log('Session created with ID:', newId);
+      return newId || null;
     } catch (error) {
       console.error('Failed to create quiz session:', error);
       return null;
@@ -296,14 +305,17 @@ export default function PublicPage() {
     setLoading(true);
     setError(null);
     try {
+      // Validate question count
       if (!isCountValid) {
-        setError("Enter a valid number of questions.");
+        setError(`Please enter a number between 1 and ${availableQuestions}.`);
         return;
       }
+      const desiredCount = countNumber;
+
       // Create quiz session if user is authenticated
       let sessionId = null;
       if (isAuthenticated && userId) {
-        sessionId = await createQuizSession();
+        sessionId = await createQuizSession(desiredCount);
         setCurrentSessionId(sessionId);
       }
 
@@ -317,7 +329,7 @@ export default function PublicPage() {
 
       // Shuffle and limit questions
       const shuffled = [...valid].sort(() => Math.random() - 0.5);
-      const limited = shuffled.slice(0, Math.min(Number(parsedCount), valid.length));
+      const limited = shuffled.slice(0, Math.min(desiredCount, valid.length));
       
       const quizQuestions = limited.map(q => ({
         questionId: q.questionId,
@@ -389,7 +401,6 @@ export default function PublicPage() {
     setShowFeedback(false);
     setCurrentSessionId(null);
     setError(null);
-    setCountInput("");
   }
 
   const currentQuestion = quiz && quizState === 'active' ? quiz[currentQuestionIndex] : null;
@@ -458,19 +469,30 @@ export default function PublicPage() {
           <div className="mt-6 grid gap-2">
             <label className="text-sm font-medium text-gray-700">Number of questions</label>
             <input
-              type="number"
-              min={1}
-              max={availableQuestions || 50}
-              value={countInput}
-              placeholder="How many Questions to you want to start with?"
+              type="text"
               inputMode="numeric"
               pattern="[0-9]*"
+              placeholder="How many questions do you want to start with?"
+              value={countInput}
               onChange={(e) => {
                 const raw = e.target.value;
-                const numericOnly = raw.replace(/\D/g, "");
-                setCountInput(numericOnly);
+                // Allow empty; otherwise only digits
+                const digitsOnly = raw.replace(/[^0-9]/g, "");
+                if (digitsOnly === "") {
+                  setCountInput("");
+                  return;
+                }
+                const next = Number(digitsOnly);
+                if (!Number.isFinite(next)) return;
+                if (availableQuestions > 0) {
+                  const clamped = Math.min(Math.max(next, 1), availableQuestions);
+                  setCountInput(String(clamped));
+                } else {
+                  // If we don't yet know max, keep numeric string as-is
+                  setCountInput(String(Math.max(next, 1)));
+                }
               }}
-              className="w-full rounded-xl border border-gray-300 px-4 py-3 text-center focus:outline-none focus:ring-2 focus:ring-purple-400"
+              className="w-full rounded-xl border border-gray-300 px-4 py-3 text-center focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:text-gray-400"
             />
             <div className="text-center text-xs text-purple-600">
               {availableQuestions > 0 
@@ -493,7 +515,7 @@ export default function PublicPage() {
             <button
               className="mt-5 rounded-xl px-5 py-3 text-white font-medium bg-gradient-to-r from-purple-500 to-indigo-500 shadow-lg shadow-purple-500/30 disabled:opacity-60"
               onClick={startQuiz}
-              disabled={loading || !isCountValid}
+              disabled={loading || !isCountValid || availableQuestions === 0}
             >
               {loading ? "Loading..." : "🚀 Start Quiz"}
             </button>
