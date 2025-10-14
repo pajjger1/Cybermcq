@@ -33,7 +33,7 @@ export default function PublicPage() {
   
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [subjectId, setSubjectId] = useState<string>("");
-  const [count, setCount] = useState<number>(5);
+  const [countInput, setCountInput] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [quiz, setQuiz] = useState<QuizQuestion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +136,17 @@ export default function PublicPage() {
     [subjects, subjectId]
   );
 
+  const parsedCount = useMemo(() => {
+    if (!/^\d+$/.test(countInput)) return NaN;
+    return Math.floor(Number(countInput));
+  }, [countInput]);
+
+  const isCountValid = useMemo(() => {
+    if (!Number.isFinite(parsedCount)) return false;
+    const n = Number(parsedCount);
+    return n >= 1 && n <= (availableQuestions || 0);
+  }, [parsedCount, availableQuestions]);
+
   async function saveUserProgress(question: QuizQuestion, selectedIndex: number, isCorrect: boolean) {
     try {
       const result = await client.models.UserProgress.create({
@@ -164,7 +175,7 @@ export default function PublicPage() {
         userId,
         subjectId: subjectId || null,
         subjectName: selectedSubject?.subjectName || 'Mixed Topics',
-        questionCount: count,
+        questionCount: Number.isFinite(parsedCount) ? Number(parsedCount) : 0,
         score: 0,
         accuracy: 0,
         startTime: new Date().toISOString(),
@@ -285,6 +296,10 @@ export default function PublicPage() {
     setLoading(true);
     setError(null);
     try {
+      if (!isCountValid) {
+        setError("Enter a valid number of questions.");
+        return;
+      }
       // Create quiz session if user is authenticated
       let sessionId = null;
       if (isAuthenticated && userId) {
@@ -302,7 +317,7 @@ export default function PublicPage() {
 
       // Shuffle and limit questions
       const shuffled = [...valid].sort(() => Math.random() - 0.5);
-      const limited = shuffled.slice(0, Math.min(count, valid.length));
+      const limited = shuffled.slice(0, Math.min(Number(parsedCount), valid.length));
       
       const quizQuestions = limited.map(q => ({
         questionId: q.questionId,
@@ -374,6 +389,7 @@ export default function PublicPage() {
     setShowFeedback(false);
     setCurrentSessionId(null);
     setError(null);
+    setCountInput("");
   }
 
   const currentQuestion = quiz && quizState === 'active' ? quiz[currentQuestionIndex] : null;
@@ -445,8 +461,15 @@ export default function PublicPage() {
               type="number"
               min={1}
               max={availableQuestions || 50}
-              value={count}
-              onChange={(e) => setCount(Math.max(1, Math.min(availableQuestions || 50, Number(e.target.value))))}
+              value={countInput}
+              placeholder="How many Questions to you want to start with?"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              onChange={(e) => {
+                const raw = e.target.value;
+                const numericOnly = raw.replace(/\D/g, "");
+                setCountInput(numericOnly);
+              }}
               className="w-full rounded-xl border border-gray-300 px-4 py-3 text-center focus:outline-none focus:ring-2 focus:ring-purple-400"
             />
             <div className="text-center text-xs text-purple-600">
@@ -470,7 +493,7 @@ export default function PublicPage() {
             <button
               className="mt-5 rounded-xl px-5 py-3 text-white font-medium bg-gradient-to-r from-purple-500 to-indigo-500 shadow-lg shadow-purple-500/30 disabled:opacity-60"
               onClick={startQuiz}
-              disabled={loading}
+              disabled={loading || !isCountValid}
             >
               {loading ? "Loading..." : "🚀 Start Quiz"}
             </button>
