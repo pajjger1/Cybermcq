@@ -168,3 +168,6 @@ temp/
 
 # Project Documentation (exclude from version control)
 MCQ-QUIZ-ARCHITECTURE.md
+
+# Local utility scripts (not for commit)
+auto_hard_refresh.py
