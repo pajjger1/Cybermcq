@@ -91,11 +91,10 @@ const schema = /* GraphQL */ `
 export const data = defineData({
   schema,
   authorizationModes: {
-    defaultAuthorizationMode: "apiKey",
+    defaultAuthorizationMode: "userPool",
     apiKeyAuthorizationMode: {
       expiresInDays: 30,
     },
-    // Enable Cognito User Pools so owner-based rules work for signed-in users
     userPoolAuthorizationMode: {},
   },
 });
