@@ -42,6 +42,10 @@ export default function PublicPage() {
   const [userEmail, setUserEmail] = useState<string>("");
   const [userId, setUserId] = useState<string>("");
   const [role, setRole] = useState<string>("User");
+  const [sessionReady, setSessionReady] = useState<boolean>(false);
+  const [guestSessionError, setGuestSessionError] = useState<string | null>(null);
+  type ReadAuthMode = "identityPool" | "userPool";
+  const readAuthMode: ReadAuthMode = isAuthenticated ? "userPool" : "identityPool";
   
   // Derived: parsed numeric count and validity
   const countNumber = useMemo(() => {
@@ -71,48 +75,88 @@ export default function PublicPage() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!sessionReady) return;
+    let cancelled = false;
     (async () => {
       try {
-        const { data: subjectsData } = await client.models.QuizSubject.list({});
+        const { data: subjectsData } = await client.models.QuizSubject.list({
+          authMode: readAuthMode,
+        });
+        if (cancelled) return;
         setSubjects(subjectsData.map(s => ({
           subjectId: s.subjectId,
           subjectName: s.subjectName,
           description: s.description || undefined
         })));
       } catch (e: any) {
+        if (cancelled) return;
         setError(e?.message || "Failed to load subjects");
       }
     })();
-  }, [client]);
+    return () => {
+      cancelled = true;
+    };
+  }, [client, readAuthMode, sessionReady]);
 
   // Determine authentication state, user email, and role from Cognito group
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const currentUser = await getCurrentUser();
         const session = await fetchAuthSession();
-        const idPayload: any = session?.tokens?.idToken?.payload ?? {};
-        const groups: string[] = (idPayload?.["cognito:groups"] as string[]) || [];
-        const emailFromToken: string | undefined = idPayload?.email as string | undefined;
-        const emailFallback: string = (currentUser as any)?.signInDetails?.loginId || currentUser?.username || "";
+        if (cancelled) return;
+        const hasUserTokens = Boolean(session.tokens?.idToken);
 
-        setIsAuthenticated(true);
-        setUserEmail(emailFromToken || emailFallback);
-        setUserId(currentUser.userId);
-        if (groups.includes("Admin")) {
-          setRole("Admin");
-        } else if (groups.length > 0) {
-          setRole(groups[0]);
+        if (hasUserTokens) {
+          try {
+            const currentUser = await getCurrentUser();
+            if (cancelled) return;
+            const idPayload: any = session.tokens?.idToken?.payload ?? {};
+            const groups: string[] = (idPayload?.["cognito:groups"] as string[]) || [];
+            const emailFromToken: string | undefined = idPayload?.email as string | undefined;
+            const emailFallback: string = (currentUser as any)?.signInDetails?.loginId || currentUser?.username || "";
+
+            setIsAuthenticated(true);
+            setUserEmail(emailFromToken || emailFallback);
+            setUserId(currentUser.userId);
+            if (groups.includes("Admin")) {
+              setRole("Admin");
+            } else if (groups.length > 0) {
+              setRole(groups[0]);
+            } else {
+              setRole("User");
+            }
+          } catch (userError) {
+            console.error("Failed to load current user:", userError);
+            setIsAuthenticated(false);
+            setUserEmail("");
+            setUserId("");
+            setRole("User");
+          }
         } else {
+          setIsAuthenticated(false);
+          setUserEmail("");
+          setUserId("");
           setRole("User");
         }
-      } catch {
-        setIsAuthenticated(false);
-        setUserEmail("");
-        setUserId("");
-        setRole("User");
+      } catch (sessionError) {
+        if (!cancelled) {
+          console.warn("Session fetch failed", sessionError);
+          setIsAuthenticated(false);
+          setUserEmail("");
+          setUserId("");
+          setRole("User");
+          setGuestSessionError("Unable to load guest session. Please refresh.");
+        }
+      } finally {
+        if (!cancelled) {
+          setSessionReady(true);
+        }
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Helper: fetch all questions across pages (optionally filtered by subject)
@@ -123,7 +167,10 @@ export default function PublicPage() {
       const args: any = {};
       if (subjectFilter) args.filter = { subjectId: { eq: subjectFilter } };
       if (nextToken) args.nextToken = nextToken;
-      const res: any = await client.models.QuizQuestion.list(args);
+      const res: any = await client.models.QuizQuestion.list({
+        ...args,
+        authMode: readAuthMode,
+      });
       all.push(...(res.data || []));
       nextToken = res.nextToken as string | undefined;
     } while (nextToken);
@@ -135,10 +182,11 @@ export default function PublicPage() {
     const unique = Array.from(uniqueMap.values());
     const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
     return valid;
-  }, [client]);
+  }, [client, readAuthMode]);
 
   // Update available question count when subject changes
   useEffect(() => {
+    if (!sessionReady) return;
     (async () => {
       try {
         const valid = await listAllQuestions(subjectId || undefined);
@@ -148,7 +196,7 @@ export default function PublicPage() {
         setAvailableQuestions(0);
       }
     })();
-  }, [subjectId, client, listAllQuestions]);
+  }, [subjectId, client, listAllQuestions, sessionReady]);
 
   const selectedSubject = useMemo(
     () => subjects.find((s) => s.subjectId === subjectId) || null,
@@ -455,6 +503,11 @@ export default function PublicPage() {
           </div>
         )}
       </div>
+      {!isAuthenticated && guestSessionError && (
+        <div className="mt-4 text-center text-sm text-red-600">
+          {guestSessionError}
+        </div>
+      )}
       <div className="w-full max-w-xl bg-white text-gray-900 rounded-3xl shadow-xl/20 shadow-black/30 p-8">
         <div className="flex items-center justify-center gap-2">
           <span className="text-3xl">💬</span>
