@@ -45,7 +45,9 @@ export default function PublicPage() {
   const [sessionReady, setSessionReady] = useState<boolean>(false);
   const [guestSessionError, setGuestSessionError] = useState<string | null>(null);
   type ReadAuthMode = "identityPool" | "userPool";
-  const readAuthMode: ReadAuthMode = isAuthenticated ? "userPool" : "identityPool";
+  // Use identityPool for ALL users (authenticated and guest) to read subjects/questions
+  // This works immediately without requiring schema deployment
+  const readAuthMode: ReadAuthMode = "identityPool";
   
   // Derived: parsed numeric count and validity
   const countNumber = useMemo(() => {
@@ -79,10 +81,12 @@ export default function PublicPage() {
     let cancelled = false;
     (async () => {
       try {
+        console.log(`[QuizPage] Loading subjects with authMode: ${readAuthMode}, isAuthenticated: ${isAuthenticated}`);
         const { data: subjectsData } = await client.models.QuizSubject.list({
           authMode: readAuthMode,
         });
         if (cancelled) return;
+        console.log(`[QuizPage] Loaded ${subjectsData.length} subjects`);
         setSubjects(subjectsData.map(s => ({
           subjectId: s.subjectId,
           subjectName: s.subjectName,
@@ -90,6 +94,7 @@ export default function PublicPage() {
         })));
       } catch (e: any) {
         if (cancelled) return;
+        console.error('[QuizPage] Failed to load subjects:', e);
         setError(e?.message || "Failed to load subjects");
       }
     })();
@@ -126,6 +131,7 @@ export default function PublicPage() {
             } else {
               setRole("User");
             }
+            console.log(`[QuizPage] User authenticated: ${emailFromToken || emailFallback}, role: ${groups.includes("Admin") ? "Admin" : (groups.length > 0 ? groups[0] : "User")}`);
           } catch (userError) {
             console.error("Failed to load current user:", userError);
             setIsAuthenticated(false);
@@ -161,6 +167,7 @@ export default function PublicPage() {
 
   // Helper: fetch all questions across pages (optionally filtered by subject)
   const listAllQuestions = useCallback(async (subjectFilter?: string) => {
+    console.log(`[QuizPage] Loading questions with authMode: ${readAuthMode}, subjectFilter: ${subjectFilter || 'none'}`);
     const all: any[] = [];
     let nextToken: string | undefined = undefined;
     do {
@@ -181,6 +188,7 @@ export default function PublicPage() {
     }
     const unique = Array.from(uniqueMap.values());
     const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
+    console.log(`[QuizPage] Found ${valid.length} valid questions`);
     return valid;
   }, [client, readAuthMode]);
 
@@ -515,7 +523,14 @@ export default function PublicPage() {
         </div>
         <p className="text-center text-gray-600 mt-2">Test your knowledge with our interactive quiz</p>
 
-        {error && <div className="text-red-600 text-sm text-center mt-2">{error}</div>}
+        {error && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-xl">
+            <div className="text-red-800 text-sm text-center font-medium">{error}</div>
+            <div className="text-red-600 text-xs text-center mt-1">
+              {isAuthenticated ? "Using authenticated access" : "Using guest access"}
+            </div>
+          </div>
+        )}
 
         {/* Quiz Setup State */}
         {quizState === 'setup' && (
@@ -558,12 +573,23 @@ export default function PublicPage() {
               className="border rounded-xl p-3"
               value={subjectId}
               onChange={(e) => setSubjectId(e.target.value)}
+              disabled={subjects.length === 0}
             >
-              <option value="">Any subject</option>
+              <option value="">{subjects.length === 0 ? "Loading subjects..." : "Any subject"}</option>
               {subjects.map((s) => (
                 <option key={s.subjectId} value={s.subjectId}>{s.subjectName}</option>
               ))}
             </select>
+            {subjects.length === 0 && sessionReady && !error && (
+              <div className="text-center text-xs text-amber-600 mt-1">
+                ⚠️ No subjects found. Please check your connection or try refreshing the page.
+              </div>
+            )}
+            {subjects.length > 0 && (
+              <div className="text-center text-xs text-green-600 mt-1">
+                ✓ {subjects.length} subject{subjects.length !== 1 ? 's' : ''} available
+              </div>
+            )}
 
             <button
               className="mt-5 rounded-xl px-5 py-3 text-white font-medium bg-gradient-to-r from-purple-500 to-indigo-500 shadow-lg shadow-purple-500/30 disabled:opacity-60"

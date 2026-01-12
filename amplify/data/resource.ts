@@ -4,6 +4,7 @@ import { defineData } from "@aws-amplify/backend";
 const schema = /* GraphQL */ `
   type QuizSubject @model @auth(rules: [
     { allow: public, provider: iam, operations: [read] },
+    { allow: private, operations: [read] },
     { allow: groups, groups: ["Admin"] }
   ]) {
     id: ID!
@@ -18,6 +19,7 @@ const schema = /* GraphQL */ `
 
   type QuizQuestion @model @auth(rules: [
     { allow: public, provider: iam, operations: [read] },
+    { allow: private, operations: [read] },
     { allow: groups, groups: ["Admin"] }
   ]) {
     id: ID!

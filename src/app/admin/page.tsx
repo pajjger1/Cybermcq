@@ -219,19 +219,14 @@ export default function AdminPage() {
         
         if (!isUserAdmin) {
           console.log("User is not in Admin group. Groups found:", groups);
-          console.log("Available groups in token:", Object.keys(session?.tokens?.idToken?.payload || {}));
-          // Don't redirect immediately, let user see the debug info
-          setTimeout(() => {
-            router.push("/auth/sign-in");
-          }, 10000); // Increased to 10 seconds
+          // Non-admin authenticated users will see the access denied page
+          // They can navigate to dashboard or home from there
         }
       } catch (error) {
         console.error("Authentication error:", error);
         setIsAdmin(false);
-        // Don't redirect immediately, let user see the debug info
-        setTimeout(() => {
-          router.push("/auth/sign-in");
-        }, 10000);
+        // User is not authenticated, redirect to sign-in
+        router.push("/auth/sign-in");
       }
     })();
   }, [router]);
@@ -292,29 +287,43 @@ export default function AdminPage() {
         <div className="max-w-2xl mx-auto">
           <div className="bg-white/10 backdrop-blur-lg rounded-3xl border border-white/20 shadow-2xl p-8">
             <div className="text-center mb-6">
-              <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.464 0L4.35 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              <div className="w-16 h-16 bg-amber-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                 </svg>
               </div>
-              <h1 className="text-3xl font-bold text-white mb-2">Access Denied</h1>
-              <p className="text-purple-100">You need admin privileges to access this area</p>
+              <h1 className="text-3xl font-bold text-white mb-2">Admin Access Required</h1>
+              <p className="text-purple-100">This area is restricted to administrators only</p>
             </div>
             
-            <div className="bg-amber-500/20 border border-amber-400/30 text-amber-100 px-6 py-4 rounded-2xl mb-6">
+            <div className="bg-blue-500/20 border border-blue-400/30 text-blue-100 px-6 py-4 rounded-2xl mb-6">
               <div className="flex items-start gap-3">
-                <svg className="w-5 h-5 text-amber-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5 text-blue-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <div className="space-y-2">
-                  <p><strong>Your account needs to be added to the "Admin" group in AWS Cognito.</strong></p>
-                  <p>Check the browser console for debug information.</p>
-                  <p>Redirecting to sign-in in 10 seconds...</p>
+                  <p><strong>You're signed in but don't have admin privileges.</strong></p>
+                  <p>You can still take quizzes and track your progress on the dashboard!</p>
                 </div>
               </div>
             </div>
             
             <div className="flex flex-col sm:flex-row gap-3 mb-6">
+              <button 
+                onClick={() => router.push("/dashboard")}
+                className="flex-1 bg-green-500/20 hover:bg-green-500/30 text-green-100 border border-green-400/30 px-6 py-3 rounded-xl font-medium transition-all duration-200 hover:scale-105"
+              >
+                📊 Go to Dashboard
+              </button>
+              <button 
+                onClick={() => router.push("/")}
+                className="flex-1 bg-purple-500/20 hover:bg-purple-500/30 text-purple-100 border border-purple-400/30 px-6 py-3 rounded-xl font-medium transition-all duration-200 hover:scale-105"
+              >
+                🚀 Take a Quiz
+              </button>
+            </div>
+            
+            <div className="flex flex-col sm:flex-row gap-3">
               <button 
                 onClick={handleForceRefresh}
                 className="flex-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-100 border border-blue-400/30 px-6 py-3 rounded-xl font-medium transition-all duration-200 hover:scale-105"
@@ -322,21 +331,11 @@ export default function AdminPage() {
                 Force Refresh Session
               </button>
               <button 
-                onClick={async () => { try { await signOut(); } catch (error) { console.error("Sign out error:", error); } finally { router.push("/auth/sign-in"); } }}
+                onClick={handleSignOut}
                 className="flex-1 bg-gray-500/20 hover:bg-gray-500/30 text-gray-100 border border-gray-400/30 px-6 py-3 rounded-xl font-medium transition-all duration-200 hover:scale-105"
               >
-                Sign Out & Back In
+                Sign Out
               </button>
-            </div>
-            
-            <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-              <h3 className="text-white font-medium mb-3">If you should have admin access:</h3>
-              <ol className="list-decimal list-inside space-y-2 text-purple-100 text-sm">
-                <li>Click "Force Refresh Session" to refresh your JWT token</li>
-                <li>Check the browser console for your current user groups</li>
-                <li>Ensure your user is added to the "Admin" group in AWS Cognito</li>
-                <li>Try signing out and signing back in</li>
-              </ol>
             </div>
           </div>
         </div>
