@@ -79,29 +79,62 @@ export default function PublicPage() {
   useEffect(() => {
     if (!sessionReady) return;
     let cancelled = false;
-    (async () => {
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    const loadSubjects = async () => {
       try {
-        console.log(`[QuizPage] Loading subjects with authMode: ${readAuthMode}, isAuthenticated: ${isAuthenticated}`);
-        const { data: subjectsData } = await client.models.QuizSubject.list({
+        console.log(`[QuizPage] Attempt ${retryCount + 1}/${maxRetries} - Loading subjects with authMode: ${readAuthMode}, isAuthenticated: ${isAuthenticated}`);
+        
+        // Clear any previous errors
+        setError(null);
+        
+        const { data: subjectsData, errors } = await client.models.QuizSubject.list({
           authMode: readAuthMode,
         });
+        
         if (cancelled) return;
-        console.log(`[QuizPage] Loaded ${subjectsData.length} subjects`);
-        setSubjects(subjectsData.map(s => ({
-          subjectId: s.subjectId,
-          subjectName: s.subjectName,
-          description: s.description || undefined
-        })));
+        
+        if (errors && errors.length > 0) {
+          console.error('[QuizPage] GraphQL errors:', errors);
+          throw new Error(errors[0].message);
+        }
+        
+        console.log(`[QuizPage] Successfully loaded ${subjectsData.length} subjects`);
+        
+        if (subjectsData.length === 0) {
+          console.warn('[QuizPage] No subjects found in database');
+          setError("No subjects available. Please contact admin to add quiz subjects.");
+        } else {
+          setSubjects(subjectsData.map(s => ({
+            subjectId: s.subjectId,
+            subjectName: s.subjectName,
+            description: s.description || undefined
+          })));
+        }
       } catch (e: any) {
         if (cancelled) return;
-        console.error('[QuizPage] Failed to load subjects:', e);
-        setError(e?.message || "Failed to load subjects");
+        console.error(`[QuizPage] Failed to load subjects (attempt ${retryCount + 1}):`, e);
+        
+        // Retry logic
+        if (retryCount < maxRetries - 1) {
+          retryCount++;
+          console.log(`[QuizPage] Retrying in 2 seconds...`);
+          setTimeout(() => {
+            if (!cancelled) loadSubjects();
+          }, 2000);
+        } else {
+          setError(`Unable to load subjects: ${e?.message || "Unknown error"}. Please refresh the page.`);
+        }
       }
-    })();
+    };
+
+    loadSubjects();
+
     return () => {
       cancelled = true;
     };
-  }, [client, readAuthMode, sessionReady]);
+  }, [client, readAuthMode, sessionReady, isAuthenticated]);
 
   // Determine authentication state, user email, and role from Cognito group
   useEffect(() => {
@@ -168,28 +201,52 @@ export default function PublicPage() {
   // Helper: fetch all questions across pages (optionally filtered by subject)
   const listAllQuestions = useCallback(async (subjectFilter?: string) => {
     console.log(`[QuizPage] Loading questions with authMode: ${readAuthMode}, subjectFilter: ${subjectFilter || 'none'}`);
-    const all: any[] = [];
-    let nextToken: string | undefined = undefined;
-    do {
-      const args: any = {};
-      if (subjectFilter) args.filter = { subjectId: { eq: subjectFilter } };
-      if (nextToken) args.nextToken = nextToken;
-      const res: any = await client.models.QuizQuestion.list({
-        ...args,
-        authMode: readAuthMode,
-      });
-      all.push(...(res.data || []));
-      nextToken = res.nextToken as string | undefined;
-    } while (nextToken);
-    // Deduplicate and keep only valid questions
-    const uniqueMap = new Map<string, any>();
-    for (const q of all) {
-      if (!uniqueMap.has(q.questionId)) uniqueMap.set(q.questionId, q);
+    
+    try {
+      const all: any[] = [];
+      let nextToken: string | undefined = undefined;
+      let pageCount = 0;
+      
+      do {
+        const args: any = {};
+        if (subjectFilter) args.filter = { subjectId: { eq: subjectFilter } };
+        if (nextToken) args.nextToken = nextToken;
+        
+        const res: any = await client.models.QuizQuestion.list({
+          ...args,
+          authMode: readAuthMode,
+        });
+        
+        if (res.errors && res.errors.length > 0) {
+          console.error('[QuizPage] GraphQL errors loading questions:', res.errors);
+          throw new Error(res.errors[0].message);
+        }
+        
+        all.push(...(res.data || []));
+        nextToken = res.nextToken as string | undefined;
+        pageCount++;
+        console.log(`[QuizPage] Loaded page ${pageCount}, total questions so far: ${all.length}`);
+      } while (nextToken);
+      
+      // Deduplicate and keep only valid questions
+      const uniqueMap = new Map<string, any>();
+      for (const q of all) {
+        if (!uniqueMap.has(q.questionId)) uniqueMap.set(q.questionId, q);
+      }
+      const unique = Array.from(uniqueMap.values());
+      const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
+      
+      console.log(`[QuizPage] Found ${valid.length} valid questions out of ${unique.length} total`);
+      
+      if (valid.length === 0) {
+        console.warn('[QuizPage] No valid questions found');
+      }
+      
+      return valid;
+    } catch (error: any) {
+      console.error('[QuizPage] Error loading questions:', error);
+      throw error;
     }
-    const unique = Array.from(uniqueMap.values());
-    const valid = unique.filter((q) => Array.isArray(q.options) && q.options.indexOf(q.correctAnswer) >= 0);
-    console.log(`[QuizPage] Found ${valid.length} valid questions`);
-    return valid;
   }, [client, readAuthMode]);
 
   // Update available question count when subject changes

@@ -167,7 +167,8 @@ temp/
 .pnp.*
 
 # Project Documentation (exclude from version control)
-MCQ-QUIZ-ARCHITECTURE.md
+*.md
+!README.md
 
 # Local utility scripts (not for commit)
 auto_hard_refresh.py
