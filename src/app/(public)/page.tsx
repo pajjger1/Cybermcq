@@ -45,9 +45,9 @@ export default function PublicPage() {
   const [sessionReady, setSessionReady] = useState<boolean>(false);
   const [guestSessionError, setGuestSessionError] = useState<string | null>(null);
   type ReadAuthMode = "identityPool" | "userPool";
-  // Use identityPool for ALL users (authenticated and guest) to read subjects/questions
-  // This works immediately without requiring schema deployment
-  const readAuthMode: ReadAuthMode = "identityPool";
+  // Use userPool for authenticated users, identityPool for guests
+  // The schema has { allow: private } which requires userPool auth for authenticated users
+  const readAuthMode: ReadAuthMode = isAuthenticated ? "userPool" : "identityPool";
   
   // Derived: parsed numeric count and validity
   const countNumber = useMemo(() => {
